@@ -1,39 +1,79 @@
 # textbook-to-note
 
-Turn your own PDF textbooks into an AI-searchable knowledge base and structured, well-cited Obsidian notes — figures included.
+Turn your own PDF textbooks into an AI-searchable knowledge base and structured, fully-cited notes — figures included. A local-first pipeline that spends (almost) zero LLM tokens on the heavy lifting and reserves the frontier model for the one thing it's uniquely good at: synthesizing a note you can actually learn from.
 
 [繁體中文說明 → README.zh-TW.md](README.zh-TW.md)
 
-## What it does
+## Why this is hard (and why naive approaches fail)
 
-Studying from large textbooks with an AI assistant has three problems: feeding raw PDFs to a frontier model is slow and expensive, the model silently misses content on scanned or badly-encoded pages, and figures — often the most important part of a technical chapter — get lost entirely.
+Feeding a raw PDF to a frontier model seems simple until you hit the real problems:
 
-This pipeline solves all three locally, spending (almost) zero LLM tokens on the heavy lifting:
+- **Cost & latency** — a 600-page book is 1-2M tokens. Re-reading it for every question is untenable.
+- **Silent data loss** — scanned pages and broken font encodings produce garbage that the model quietly skips. You never learn your note is missing half the chapter.
+- **Scrambled text** — most textbooks are two-column. Default PDF text extraction interleaves the columns, and a naive "is this garbled?" check *passes* the shuffled output because the characters themselves are fine.
+- **Figures vanish** — the anatomy diagram, the classification table, the treatment algorithm: often the most valuable part of a chapter, and text extraction drops all of it.
+- **Ungrounded output** — an AI writing notes from memory hallucinates. Every claim needs to trace back to a source.
 
-1. **Convert** (`converter/`) — PDF/EPUB → clean chapter-split markdown. Text extraction via PyMuPDF + pdfplumber (~130 ms/page, 0 tokens), with an OCR fallback ladder for scanned pages (Surya → PaddleOCR-VL → local vision model → frontier-model vision as the very last resort). Silent-failure detection catches pages where text extraction *looks* fine but isn't.
-2. **Index** (optional) — build a local semantic search index (LanceDB + bge-m3 embeddings via ollama) so your AI assistant can search across every book you own instead of reading them cover to cover.
-3. **Write notes** (`workflows/`) — a structured AI workflow that drafts a complete note on a topic from your converted books: skeleton first, every claim cited to book + chapter, uncited additions explicitly marked as inferred, then merged with any existing note you have.
-4. **Extract figures** (`figures/`) — on-demand single-figure extraction with a deterministic QC gate: geometric matching against the figure registry, whitespace/text-bleed/OCR checks, and an optional local vision model for guided retries. The AI never "eyeballs" a crop and calls it done — the gate decides.
+This pipeline treats each of those as a distinct engineering problem with a deliberate solution, organized as five stages.
+
+## The five stages
+
+### 1 · Convert — PDF/EPUB → clean markdown, 0 tokens
+
+PyMuPDF text extraction at ~130 ms/page. Two non-obvious pieces:
+
+- **Silent-failure detection** — a native text layer can *lie* (CID/Identity-H fonts, PUA codepoints). We score glyph-garble ratio, character density, and font risk to catch pages that "extracted fine" but didn't, and route only those to OCR.
+- **Column-aware reading order** — line-level column clustering reconstructs true reading order on two-column layouts, with an exact-fallback path so single-column pages are byte-identical to the trivial extraction. (`T2N_COLUMN_SORT=0` to disable.)
+- **Table pass, gated** — `pdfplumber`'s table detection is the slowest part of conversion. We gate it behind a cheap `fitz` pre-check (ruling-line signature incl. three-line tables, plus multilingual "Table"/表 keywords), so table-sparse books convert **~3.4× faster** without missing tables. (`T2N_TABLE_GATE=0` to disable.)
+
+Scanned pages fall through an **OCR ladder** — Surya → PaddleOCR-VL → local vision model → frontier vision as the true last resort — chosen per-page, never committing a whole book to one method. See [`docs/ocr-ladder.md`](docs/ocr-ladder.md), including a **hardware-tier model-selection table** (no-GPU / Apple Silicon / NVIDIA 8GB / 16GB+) so you pick an engine and ollama model that actually fit your VRAM instead of OOMing mid-book.
+
+### 2 · Chunk — into semantically searchable units
+
+A table of contents is too coarse (one topic spans many chapters); manual tags don't scale and can't be granular enough. The answer is **semantic embedding**. But chunking is a design decision, not a fixed window: split too small and you lose context, too large and you dilute meaning. We chunk **by heading structure** and carry each chunk's parent-section context, so every retrieved unit is a self-contained concept with its provenance attached.
+
+### 3 · Retrieve — find the right book among dozens
+
+Cross-book search runs on the same engine as its sibling project [**vault-search**](https://github.com/drpwchen/vault-search) — local LanceDB + `bge-m3` embeddings, nothing leaves your machine. On top of plain similarity we add **source weighting**: boost your most-trusted references (exam-designated texts, official society textbooks) and down-weight by edition age, so on any topic the AI reaches for the source *you* trust first.
+
+### 4 · Write — a note-writing algorithm, not a prompt
+
+Note quality comes from the workflow, not the model:
+
+- **Blind draft first** — the AI researches the topic fully from the textbook corpus *before* looking at any existing note, so an old note's structure and content can't bias the new draft. Merge comes last.
+- **Template-driven extraction** — each topic type has a fixed template. This is load-bearing: it tells the AI exactly what to hunt for in the source, and it means every note has the same predictable shape so *you* read faster. Sections like a leading Summary and a Management-algorithm block exist specifically to aid comprehension, not just to hold data.
+- **Cite or it didn't happen** — every claim carries book + chapter; anything the AI adds from its own knowledge is explicitly flagged as inferred.
+- **Non-destructive merge** — replacing an existing note is gated on your vault being under version control; otherwise it writes a draft beside the original. It will not silently overwrite your hand-written notes.
+
+See [`workflows/note-writing.md`](workflows/note-writing.md).
+
+### 5 · Extract figures — the hard one
+
+Every book lays figures out differently, so there's no single crop rule. We use a **general geometric-matching method** (a caption owns the nearest assignable raster) behind a **deterministic QC gate**: whitespace-fill, text-bleed, and OCR-long-line checks all run *before* any AI is allowed to judge the crop — and the gate hard-fails rather than guessing, so a wrong page yields a refusal, not a wrong figure. Everything runs locally, token-frugally.
+
+When a specific book extracts wrong, you fix *that book's* logic once, and every later extraction from it is correct. This stage has been through many iterations and is still **experimental** — it doesn't yet handle every book, and improvement PRs are very welcome. See [`figures/CALIBRATION.md`](figures/CALIBRATION.md).
+
+### Bonus · Pluggable evidence enrichment
+
+The note workflow has optional hook points to enrich a draft from external sources — a clinical-evidence API, a regulations/coverage database, a literature search. These are kept out of this repo to bound its scope; the workflow doc marks exactly where they slot in so you can wire in your own domain's sources.
 
 ## Designed to be deployed by an AI
 
-You are probably reading this because you want *your* AI assistant to set it up. Good — that is the intended path:
+You're probably here to have *your* AI set this up — that's the intended path:
 
 > Point Claude Code (or any capable coding agent) at this repo and say:
 > **"Read AGENTS.md and set this up for me."**
 
-[`AGENTS.md`](AGENTS.md) contains step-by-step instructions written for the agent: dependency install, configuration, converting a first book, installing the two Claude Code skills, and running the note workflow.
-
-Manual setup instructions are in [`docs/architecture.md`](docs/architecture.md) if you prefer to drive yourself.
+[`AGENTS.md`](AGENTS.md) is written for the agent: dependency install, configuration, converting a first book, installing the two Claude Code skills, running the note workflow, plus token guardrails so a naive agent doesn't burn a million tokens reading a whole book into context.
 
 ## Repo layout
 
 ```
-converter/    PDF/EPUB → markdown scripts (convert.py is the entrypoint)
-figures/      figure extraction + QC gate (figure_remap.py is the entrypoint)
+converter/    PDF/EPUB → markdown (convert.py — silent-failure + column-sort + table-gate)
+figures/      figure extraction + deterministic QC gate (figure_remap.py entrypoint)
 skills/       drop-in Claude Code skill definitions (textbook-to-md, figure-remap)
-workflows/    the note-writing workflow prompt (adapt to your own note system)
-docs/         architecture, OCR ladder, calibration guide
+workflows/    the note-writing algorithm (adapt to your own note system)
+docs/         architecture, OCR ladder + hardware-tier model table
 examples/     a sample output note showing the target format
 shared/       env-driven configuration (config.py)
 ```
@@ -41,19 +81,23 @@ shared/       env-driven configuration (config.py)
 ## Requirements
 
 - Python 3.10+, `pip install -r requirements.txt`
-- Works CPU-only for digitally-born PDFs (the common case)
-- Optional, for scanned books and figure QC: an NVIDIA GPU + [Surya OCR](https://github.com/VikParuchuri/surya), [ollama](https://ollama.com) with a small vision model (e.g. `minicpm-v:8b`) and `bge-m3` for embeddings — all local, nothing leaves your machine
-- Tested on Windows 11 and macOS; Windows-specific gotchas are documented in the code
+- **CPU-only is a first-class path** for born-digital PDFs (the common case) — no GPU needed
+- Optional, for scanned books and figure QC: an NVIDIA GPU or Apple Silicon + [Surya OCR](https://github.com/VikParuchuri/surya), [ollama](https://ollama.com) with a small vision model and `bge-m3` for embeddings — all local, nothing leaves your machine. See the hardware-tier table in [`docs/ocr-ladder.md`](docs/ocr-ladder.md).
+- Tested on Windows 11 and macOS; Windows-specific gotchas are handled in code (cp950 subprocess decoding, atomic-ish path ops)
 
 ## Philosophy
 
-- **Local-first, token-frugal**: the expensive AI is reserved for the one thing it's uniquely good at (synthesizing notes), never for mechanical page-by-page reading.
-- **Deterministic gates over AI vibes**: every figure crop and every OCR page passes rule-based QC before an AI is allowed to judge it. Thresholds are never tuned to make a failing case pass.
-- **Citations or it didn't happen**: every claim in a generated note carries its source (book + chapter). Anything the AI adds from its own knowledge is explicitly flagged.
+- **Local-first, token-frugal** — the expensive AI is reserved for synthesis, never mechanical page-by-page reading.
+- **Deterministic gates over AI vibes** — every figure crop and OCR page passes rule-based QC before an AI is allowed to judge it, and thresholds are *never* tuned just to make a failing case pass.
+- **Citations or it didn't happen** — every claim traces to book + chapter; AI-inferred additions are flagged.
 
 ## Bring your own books
 
-This tool ships **no textbook content**. It operates on PDF files you already own — your purchased ebooks, institutional-access downloads, open-licensed texts (e.g. [OpenStax](https://openstax.org)), or scans of your own paper books where your local law permits. Respect your books' licenses.
+This tool ships **no textbook content**. It operates on PDFs you already own — purchased ebooks, institutional-access downloads, open-licensed texts ([OpenStax](https://openstax.org)), or scans of your own paper books where your local law permits. Respect your books' licenses.
+
+## Related
+
+- [**vault-search**](https://github.com/drpwchen/vault-search) — the local semantic-search engine stage 3 builds on.
 
 ## License
 
