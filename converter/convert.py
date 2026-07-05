@@ -23,6 +23,7 @@ import fitz
 import pdfplumber
 import os
 import re
+import shutil
 import sys
 import time
 import argparse
@@ -110,6 +111,163 @@ def annotate_fig_refs(text: str, page_num: int) -> tuple[str, int]:
     return annotated, len(refs_found)
 
 
+# === Two-column reading order (Improvement 1) ===
+# fitz's default get_text() can interleave the two columns of a two-column layout
+# (left-line-1, right-line-1, left-line-2, ...) because it reads roughly top-to-bottom.
+# The garbled-glyph silent-failure detector does NOT catch this (the glyphs are fine, only
+# their order is wrong), so we reorder line-by-line: all left-column lines, then all right,
+# separated by any full-width blocks (headers/titles that span both columns).
+#
+# Kill-switch: set T2N_COLUMN_SORT=0 to disable and always use plain get_text() (default on).
+#
+# Heuristic constants (documented at definition site):
+COLUMN_TOL_FRAC = 0.05   # gutter tolerance as a fraction of page width; a line must clear the
+                         # page center by this much to count as belonging to one column, and a
+                         # line straddling center by this much on both sides is "full-width".
+COLUMN_MIN_LINES = 2     # each column needs at least this many lines before we trust that the
+                         # page is really two-column (guards against a stray short line).
+
+
+def column_sorted_text(page) -> str | None:
+    """Return page text reordered into two-column reading order, or None when the page is
+    single-column / ambiguous (caller then falls back to plain get_text() → byte-identical to
+    the pre-change behavior). Operates at dict-mode line granularity: fitz merges same-baseline
+    left+right text at the block level, so lines are the reliable unit for column separation.
+    """
+    if os.environ.get("T2N_COLUMN_SORT", "1") == "0":
+        return None
+
+    d = page.get_text("dict")
+    lines = []  # (x0, y0, x1, y1, text)
+    for blk in d.get("blocks", []):
+        if blk.get("type") != 0:  # skip image blocks
+            continue
+        for ln in blk.get("lines", []):
+            txt = "".join(s.get("text", "") for s in ln.get("spans", []))
+            if not txt.strip():
+                continue
+            bb = ln["bbox"]
+            lines.append((bb[0], bb[1], bb[2], bb[3], txt))
+
+    if len(lines) < 4:
+        return None
+
+    page_w = page.rect.width
+    center = page.rect.x0 + page_w / 2.0
+    tol = page_w * COLUMN_TOL_FRAC
+
+    full, left, right = [], [], []
+    for ln in lines:
+        x0, _, x1, _, _ = ln
+        if x0 < center - tol and x1 > center + tol:
+            full.append(ln)              # spans both columns → header/title/full-width para
+        elif (x0 + x1) / 2.0 < center:
+            left.append(ln)
+        else:
+            right.append(ln)
+
+    # Need two genuine clusters, or it's not a two-column page.
+    if len(left) < COLUMN_MIN_LINES or len(right) < COLUMN_MIN_LINES:
+        return None
+    # Gutter integrity: left lines must end before center and right lines start after it
+    # (with tolerance). Overlap across the center means the split is ambiguous → fall back.
+    if max(l[2] for l in left) > center + tol:
+        return None
+    if min(r[0] for r in right) < center - tol:
+        return None
+
+    # Emit in bands split by full-width lines: for each band, left column top-to-bottom then
+    # right column top-to-bottom, with the full-width separator between bands. A line's band
+    # is the count of full-width lines above it, so top full-width blocks (e.g. a heading) and
+    # their bands come first.
+    full.sort(key=lambda l: l[1])
+
+    def band(ln):
+        return sum(1 for f in full if f[1] <= ln[1])
+
+    ordered = []
+    for bi in range(len(full) + 1):
+        ordered.extend(sorted((l for l in left if band(l) == bi), key=lambda l: l[1]))
+        ordered.extend(sorted((r for r in right if band(r) == bi), key=lambda r: r[1]))
+        if bi < len(full):
+            ordered.append(full[bi])
+
+    return "\n".join(l[4] for l in ordered)
+
+
+# === Table-pass gating (Improvement 2) ===
+# pdfplumber.extract_tables() is the runtime hot spot on big books (it re-parses page geometry).
+# Most textbook pages have no table at all, so we cheaply pre-screen each page with fitz (already
+# open) and only hand pdfplumber the pages that plausibly contain a table. Skipped pages never
+# trigger pdfplumber's per-page parse (the .pages[i] access is what costs the time).
+#
+# Kill-switch: set T2N_TABLE_GATE=0 to restore always-on behavior (run pdfplumber on every page).
+#
+# Heuristic constants:
+TABLE_RULE_MIN = 2         # a ruled table has at least this many horizontal AND vertical rulings
+TABLE_RULE_MIN_LEN = 10.0  # ignore ruling segments shorter than this (pt) — stray marks, ticks
+# Three-line ("booktabs") tables common in academic books have horizontal rulings only (top rule,
+# midrule, bottom rule) and no verticals. Signature: >= this many WIDE horizontal rulings, each
+# spanning at least TABLE_HRULE_MIN_WIDTH_FRAC of the page width (≈ the text-column width). The
+# ">= 3 wide rules" bar rejects a lone header underline or a single hairline separator.
+TABLE_HRULE_MIN_COUNT = 3
+TABLE_HRULE_MIN_WIDTH_FRAC = 0.40
+
+# Table caption keywords. Default covers English "Table"/"Tables"/"Tab." (abbrev.) and CJK 表.
+# Whole-word bounds on the ASCII terms avoid "comfortable"/"notable"; CJK 表 needs no boundary.
+# Extra literal keywords for other languages (e.g. Tabelle, Tableau, Tabla) can be appended via
+# env T2N_TABLE_KEYWORDS as a comma-separated list, e.g. T2N_TABLE_KEYWORDS="Tabelle,Tableau".
+_TABLE_KW_BASE = [r'\btables?\b', r'\btab\.', '表']
+_TABLE_KW_CACHE: dict[str, "re.Pattern"] = {}
+
+
+def _table_keyword_re() -> "re.Pattern":
+    """Compiled caption-keyword regex, base terms plus any env T2N_TABLE_KEYWORDS, cached per env."""
+    extra = os.environ.get("T2N_TABLE_KEYWORDS", "")
+    if extra not in _TABLE_KW_CACHE:
+        parts = list(_TABLE_KW_BASE)
+        for kw in extra.split(","):
+            kw = kw.strip()
+            if kw:
+                parts.append(re.escape(kw))
+        _TABLE_KW_CACHE[extra] = re.compile("|".join(parts), re.IGNORECASE)
+    return _TABLE_KW_CACHE[extra]
+
+
+def page_has_table_candidate(fitz_page, page_text: str) -> bool:
+    """Cheap fitz-only pre-check: does this page plausibly contain a table? True if the page text
+    mentions a table caption keyword (Table/Tab./表/…), OR the page's vector drawings form a grid
+    (>= TABLE_RULE_MIN horizontal AND vertical rulings), OR they form a three-line table
+    (>= TABLE_HRULE_MIN_COUNT wide horizontal rulings, no verticals needed). Gates pdfplumber.
+    """
+    if _table_keyword_re().search(page_text):
+        return True
+    wide_min = fitz_page.rect.width * TABLE_HRULE_MIN_WIDTH_FRAC
+    h = v = wide_h = 0
+    for d in fitz_page.get_drawings():
+        for it in d.get("items", []):
+            op = it[0]
+            if op == "l":  # line segment: (x0,y0)-(x1,y1)
+                p1, p2 = it[1], it[2]
+                if abs(p1.y - p2.y) < 1.0 and abs(p1.x - p2.x) >= TABLE_RULE_MIN_LEN:
+                    h += 1
+                    if abs(p1.x - p2.x) >= wide_min:
+                        wide_h += 1
+                elif abs(p1.x - p2.x) < 1.0 and abs(p1.y - p2.y) >= TABLE_RULE_MIN_LEN:
+                    v += 1
+            elif op == "re":  # rectangle: contributes one horizontal + one vertical rule pair
+                r = it[1]
+                if r.width >= TABLE_RULE_MIN_LEN:
+                    h += 1
+                    if r.width >= wide_min:
+                        wide_h += 1
+                if r.height >= TABLE_RULE_MIN_LEN:
+                    v += 1
+            if (h >= TABLE_RULE_MIN and v >= TABLE_RULE_MIN) or wide_h >= TABLE_HRULE_MIN_COUNT:
+                return True
+    return False
+
+
 # === Table extraction ===
 def extract_tables_md(plumber_page) -> list[str]:
     """Extract tables from a pdfplumber page, return as markdown strings."""
@@ -172,9 +330,16 @@ def convert_pdf(pdf_path: str, out_path: str, book_label: str) -> dict:
 
     total_tables = 0
     total_fig_refs = 0
+    table_gate_on = os.environ.get("T2N_TABLE_GATE", "1") != "0"
 
     for i in range(total_pages):
-        page_text = clean_text(doc[i].get_text().strip())
+        # Improvement 1: two-column reading order. column_sorted_text() returns None for
+        # single-column / ambiguous pages, so those keep the exact pre-change get_text() path.
+        ordered = column_sorted_text(doc[i])
+        if ordered is None:
+            page_text = clean_text(doc[i].get_text().strip())
+        else:
+            page_text = clean_text(ordered.strip())
 
         # Annotate figure/table references
         page_text, fig_count = annotate_fig_refs(page_text, i + 1)
@@ -183,9 +348,13 @@ def convert_pdf(pdf_path: str, out_path: str, book_label: str) -> dict:
         output.append(f"\n<!-- page {i+1} -->\n")
         output.append(page_text)
 
-        # Extract tables
+        # Improvement 2: only run the expensive pdfplumber pass on pages that plausibly hold a
+        # table. Skipped pages never touch plumber.pages[i], so they don't pay the parse cost.
         try:
-            md_tables = extract_tables_md(plumber.pages[i])
+            if table_gate_on and not page_has_table_candidate(doc[i], page_text):
+                md_tables = []
+            else:
+                md_tables = extract_tables_md(plumber.pages[i])
         except Exception:
             md_tables = []
         for j, tbl in enumerate(md_tables):
@@ -627,6 +796,11 @@ def convert_epub(epub_path: str, out_dir: Path, label: str = "") -> dict:
     ft = out_dir / "full_text.md"
     label = label or out_dir.name
 
+    if not shutil.which("pandoc"):
+        raise RuntimeError(
+            "pandoc not found on PATH — install from pandoc.org, needed only for EPUB input"
+        )
+
     subprocess.run(
         ["pandoc", str(epub_path), "-t", "gfm", "--wrap=none", "-o", str(ft)],
         check=True, capture_output=True,
@@ -1030,14 +1204,22 @@ def main():
                 out_dir = OUTPUT_BASE / stem
             label = args.book_label or out_dir.name
             print(f"Converting epub: {pdf_path}")
-            stats = convert_epub(pdf_path, out_dir, label)
+            try:
+                stats = convert_epub(pdf_path, out_dir, label)
+            except RuntimeError as e:
+                print(f"[ERROR] {e}")
+                sys.exit(1)
             print(f"[OK] epub | {stats['chapters']} chapters | {stats['words']} words | {stats['size_kb']} KB")
             print(f"Output: {out_dir}")
         else:
             if not args.output_path:
-                # Auto-generate output path
-                stem = Path(pdf_path).stem.replace(" ", "_").replace(",", "")
-                out_path = str(OUTPUT_BASE / "misc" / (stem + ".md"))
+                # Auto-generate output path using the SAME book-folder convention
+                # --batch-dir uses (OUTPUT_BASE/<pdf stem>/full_text.md) — not a
+                # separate misc/ tree — so a later --batch-dir run recognizes this
+                # file as already converted (should_convert()/mtime check) instead
+                # of duplicating it under a differently-named markdown.
+                stem = Path(pdf_path).stem
+                out_path = str(OUTPUT_BASE / stem / "full_text.md")
             else:
                 out_path = args.output_path
 

@@ -38,7 +38,10 @@ Ask, or infer from context:
   for a small personal library, skip it initially and add later.
 - Do they have a GPU available locally? This affects whether the OCR ladder
   (`docs/ocr-ladder.md`) can use a GPU-accelerated engine or should fall
-  back to CPU-only options.
+  back to CPU-only options. See "Choosing your hardware tier" in
+  `docs/ocr-ladder.md` for the tier table (CPU-only / Apple Silicon 8GB /
+  Apple Silicon 16GB+ / NVIDIA 8GB / NVIDIA 16GB+) before recommending any
+  OCR/vision-QC/embedding stack.
 
 ## Step 2: Install dependencies
 
@@ -104,7 +107,10 @@ python converter/convert.py --batch-dir "path/to/their/textbook/folder"
 ```
 
 This can take a while for a large library — run it as a background job and
-report progress, don't block the conversation on it.
+report progress, don't block the conversation on it. Don't run two batch
+conversions against the same `OUTPUT_DIR` concurrently — progress tracking
+is last-writer-wins, so overlapping runs will corrupt each other's progress
+state.
 
 ## Step 5: (Optional) Build the semantic index
 
@@ -168,6 +174,22 @@ format-lint script and wire it in as a pre-write hook in your agent
 framework. This repo doesn't ship one by default since notes-tool
 conventions vary too much across users, but `workflows/note-writing.md`'s
 self-check section lists exactly what such a hook should catch.
+
+## Token guardrails
+
+These apply any time you're working with the converted corpus, not just
+during initial setup:
+
+- When consulting the converted corpus, **always grep or semantic-search
+  first**, then `Read` only a bounded window (roughly ≤150 lines) around the
+  hit. Never `Read` an entire `full_text.md` or a whole chapter file into
+  context — a single book can be well over 1M tokens, and reading it whole
+  defeats the entire point of converting to a searchable corpus.
+- Frontier-vision figure escalation (ladder step 5 in `docs/ocr-ladder.md`)
+  is per-figure opt-in and capped — at most a small fixed number of
+  escalations per note. Prefer leaving a `<!-- TODO: figure -->` placeholder
+  over a third escalation on the same note, and never batch-escalate a set
+  of figures to frontier vision at once.
 
 ## Ongoing use
 

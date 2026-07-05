@@ -7,12 +7,13 @@ as a potential mismatch.
 """
 import base64
 import json
+import os
 import random
 import re
 import urllib.request
 from pathlib import Path
 
-OLLAMA = "http://127.0.0.1:11434"
+OLLAMA = os.environ.get("T2N_OLLAMA_HOST", "http://127.0.0.1:11434")
 MODEL = "minicpm-v:8b"  # vision model on /api/generate; replaced gemma4:e4b (thinking model returned empty on /api/generate)
 
 # Modality keyword groups — overlap = compatible, no overlap = suspicious

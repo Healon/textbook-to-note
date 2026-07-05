@@ -150,9 +150,9 @@ Example skeleton (concept/entity template):
 - <table: alternatives + key distinguishing points>
 
 # Management / Application
-## ⭐ Decision algorithm
+## ⭐ Decision algorithm (domain-optional)
 > [!note] Algorithm
-> - <decision tree on the axis that actually drives real-world decisions for this topic>
+> - <decision tree on the axis that actually drives real-world decisions for this topic — fits procedural/clinical/engineering-style topics with a real decision point; skip this sub-section for humanities/history-style topics that don't have one>
 ## Goals
 - <one line>
 ## Options
@@ -224,6 +224,13 @@ classification, and imaging figures from the textbook corpus so notes are
 visual, not pure text. Every embedded figure passes a QC gate — no figure is
 trusted without verification (see `skills/figure-remap/SKILL.md`).
 
+**N/A for EPUB-sourced books.** EPUB has no fixed page layout, so the
+`<!-- REF -->` page markers this phase depends on don't exist for
+EPUB-sourced material. Skip this phase entirely for such a book and record
+`figures: n/a (epub source)` in the note's frontmatter/metadata rather than
+leaving the field blank or attempting extraction against a page number that
+doesn't correspond to anything.
+
 **Don't skip silently.** If a topic genuinely has no embeddable figures,
 state that explicitly ("no qualifying figures after selection filter —
 skipped") rather than leaving it unmentioned.
@@ -279,10 +286,15 @@ phase allowed to read an existing note on the topic.
 **No existing note** → confirm the target location/subfolder with the user
 if ambiguous, show the full draft for approval, then write it.
 
-**Existing note found** → the default recommended behavior is
-replace-rather-than-append, with version history/rollback handled by your
-version-control system rather than a manual backup step. Only pause for
-per-item approval when:
+**Existing note found** → the default is **non-destructive**. Before
+replacing an existing note, verify the vault is actually under version
+control (e.g. `git status` succeeds in the vault root) — version-control
+rollback is a checked precondition, not an assumption. If the vault is
+under version control, replace-rather-than-append is safe, with version
+history/rollback handled by that VCS rather than a manual backup step. If
+it is **not** under version control, either write the draft alongside the
+original as `<note> (draft).md` rather than overwriting, or get explicit
+user confirmation before replacing. Only pause for per-item approval when:
 - The existing note is substantial (well over ~50 lines) and contains
   clearly hand-written, non-textbook content (personal observations,
   first-hand experience) that a blind textbook draft has no way to

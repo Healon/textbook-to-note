@@ -32,8 +32,8 @@ Updates figure_qc_log.json on every check. Auto-suggests purge when fail_rate > 
 Configuration (env vars, see shared/config.py for BOOKS_DIR / OUTPUT_DIR):
   T2N_OLLAMA_HOST       — ollama base URL (default http://127.0.0.1:11434)
   T2N_OLLAMA_VISION_MODEL — vision model tag (default minicpm-v:8b)
-  T2N_RENDER_CACHE_DIR  — page-render cache dir (default ./cache/renders)
   T2N_QC_LOG_PATH       — QC log file path (default <OUTPUT_DIR>/figure_qc_log.json)
+  T2N_QC_WHITESPACE_MIN — whitespace-fill QC threshold (default 0.80)
 """
 from __future__ import annotations
 
@@ -63,12 +63,11 @@ except ImportError:
 # ─── Figure-specific config (env-driven, not shared across the repo) ─────────
 OLLAMA = os.environ.get("T2N_OLLAMA_HOST", "http://127.0.0.1:11434")
 MODEL = os.environ.get("T2N_OLLAMA_VISION_MODEL", "minicpm-v:8b")  # vision model; use /api/generate (some vision models 500 on /api/chat with images)
-RENDER_CACHE_DIR = Path(os.environ.get("T2N_RENDER_CACHE_DIR", "./cache/renders"))
 
 QC_LOG_PATH = Path(os.environ.get("T2N_QC_LOG_PATH", str(OUTPUT_DIR / "figure_qc_log.json")))
 
 # ─── Tunable thresholds ───────────────────────────────────────────────────────
-WHITESPACE_FILL_MIN = 0.80      # content bbox / image bbox must be ≥ this
+WHITESPACE_FILL_MIN = float(os.environ.get("T2N_QC_WHITESPACE_MIN", "0.80"))  # content bbox / image bbox must be ≥ this
 TEXT_BLEED_CHAR_MAX = 50         # fitz PROSE-chars-in-region threshold. Recalibrated
                                  # 100→50 when counting switched from all-text to
                                  # prose-only (labels excluded): legit figures now score
@@ -701,6 +700,28 @@ def log_qc(book: str, passed: bool, reasons: list[str],
 
 # ─── Orchestrator ─────────────────────────────────────────────────────────────
 
+# Checks whose "skip" means the QC verdict is not a real verdict — the check's
+# dependency was unavailable (PIL/numpy missing, no PDF context, ollama
+# unreachable) and it defaulted to pass. caption-advisory is excluded: it never
+# gates, and "no_caption" is a normal (not degraded) state.
+_DEGRADE_CHECKS = {"whitespace", "text_bleed", "contamination"}
+
+
+def qc_degradation(reasons: list[str]) -> tuple[bool, list[str]]:
+    """Derive (qc_degraded, qc_skipped) from a run_local_qc reasons list.
+
+    Each reason is "<check_name>:<message>"; a check counts as skipped when
+    its message starts with "skip:" (see _DEGRADE_CHECKS for which checks
+    count toward degradation).
+    """
+    skipped = []
+    for r in reasons:
+        name, sep, rest = r.partition(":")
+        if name in _DEGRADE_CHECKS and sep and rest.startswith("skip:"):
+            skipped.append(name)
+    return (bool(skipped), skipped)
+
+
 def run_local_qc(img_path: Path, caption: str | None,
                  pdf_path: str | None = None,
                  page_idx: int | None = None,
@@ -759,10 +780,22 @@ def gate(book: str, fig_id: str, caption: str, out_path: Path,
     based pick. A fig_id that cannot be deterministically matched returns
     {pass:False, hard_fail:True, reason:...} rather than silently resolving to a
     wrong raster. Steps 1-4 functions remain defined but are never called here.
+
+    Every returned dict also carries qc_degraded (bool) and qc_skipped (list of
+    check names): true/non-empty when a QC check in the deciding run_local_qc
+    call had to skip for lack of a dependency (PIL/numpy, PDF context, ollama)
+    and defaulted to pass rather than giving a real verdict — see
+    qc_degradation(). False/[] when every check that ran gave a real verdict.
     """
     fig_norm = normalize_fig_id(fig_id) if fig_id else ""
     attempts = []
     have_pdf = bool(pdf_path) and page_idx is not None
+    qc_skipped_acc: list[str] = []
+
+    def _track_qc(reasons: list[str]) -> None:
+        for s in qc_degradation(reasons)[1]:
+            if s not in qc_skipped_acc:
+                qc_skipped_acc.append(s)
 
     # Step -1: backend selection (capability-based). Scanned PDFs route to the
     # caption-anchor backend (figure_scanned.py); born-digital continues into
@@ -791,7 +824,8 @@ def gate(book: str, fig_id: str, caption: str, out_path: Path,
                                           "backend_confidence": _decision.confidence}],
                             "escalate": False,
                             "match_method": "caption_anchor",
-                            "fig_id_normalized": result["fig_id_normalized"]}
+                            "fig_id_normalized": result["fig_id_normalized"],
+                            "qc_degraded": False, "qc_skipped": []}
                 # Scanned backend failure semantics (policy vs content):
                 #   hard_fail = content semantics (caption_anchor refused).
                 #     Strict OR non-strict, the page's structure says
@@ -808,7 +842,8 @@ def gate(book: str, fig_id: str, caption: str, out_path: Path,
                             "escalate": False, "hard_fail": True,
                             "match_method": "FAIL",
                             "fig_id_normalized": fig_norm,
-                            "reason": result.get("reason", "scanned hard_fail")}
+                            "reason": result.get("reason", "scanned hard_fail"),
+                            "qc_degraded": False, "qc_skipped": []}
                 # Non-hard scanned failure (e.g., QC reject without an
                 # identity/geometry guard firing) → escalate for human
                 # review. Still no fall-through to born-digital path.
@@ -816,7 +851,8 @@ def gate(book: str, fig_id: str, caption: str, out_path: Path,
                         "attempts": [{"src": "caption_anchor", "pass": False,
                                       "reasons": [result.get("reason", "")]}],
                         "escalate": True,
-                        "err": result.get("reason", "scanned extraction failed")}
+                        "err": result.get("reason", "scanned extraction failed"),
+                        "qc_degraded": False, "qc_skipped": []}
         except Exception as _e:
             # Backend-selection error must NOT silently fall through to
             # geometric_match on a scanned page (that always returns wrong
@@ -832,6 +868,7 @@ def gate(book: str, fig_id: str, caption: str, out_path: Path,
             if render_bbox(pdf_path, page_idx, geo_bbox, tmp):
                 ok, reasons = run_local_qc(tmp, caption, pdf_path, page_idx,
                                            geo_bbox)
+                _track_qc(reasons)
                 attempts.append({"src": "geometric_match", "pass": ok,
                                  "reasons": reasons, "bbox": geo_bbox})
                 log_qc(book, ok, reasons, method="geometric_match")
@@ -847,7 +884,9 @@ def gate(book: str, fig_id: str, caption: str, out_path: Path,
                     return {"pass": True, "file": str(out_path),
                             "attempts": attempts, "escalate": False,
                             "match_method": "geometric_match",
-                            "fig_id_normalized": fig_norm}
+                            "fig_id_normalized": fig_norm,
+                            "qc_degraded": bool(qc_skipped_acc),
+                            "qc_skipped": list(qc_skipped_acc)}
                 try:
                     tmp.unlink()
                 except Exception:
@@ -870,13 +909,16 @@ def gate(book: str, fig_id: str, caption: str, out_path: Path,
         return {"pass": False, "file": None, "attempts": attempts,
                 "escalate": False, "hard_fail": True,
                 "match_method": "FAIL", "fig_id_normalized": fig_norm,
-                "reason": reason}
+                "reason": reason,
+                "qc_degraded": bool(qc_skipped_acc),
+                "qc_skipped": list(qc_skipped_acc)}
 
     # Step 1: existing file (fallback when geometric match failed/unavailable)
     if existing_path and existing_path.exists():
         ok, reasons = run_local_qc(
             existing_path, caption, pdf_path, page_idx, existing_bbox
         )
+        _track_qc(reasons)
         attempts.append({"src": "existing", "pass": ok, "reasons": reasons})
         log_qc(book, ok, reasons, method="existing")
         if ok:
@@ -885,7 +927,9 @@ def gate(book: str, fig_id: str, caption: str, out_path: Path,
                 out_path.write_bytes(existing_path.read_bytes())
             return {"pass": True, "file": str(out_path), "attempts": attempts,
                     "escalate": False, "match_method": "existing",
-                    "fig_id_normalized": fig_norm}
+                    "fig_id_normalized": fig_norm,
+                    "qc_degraded": bool(qc_skipped_acc),
+                    "qc_skipped": list(qc_skipped_acc)}
         # QC fail → delete existing
         try:
             existing_path.unlink()
@@ -895,7 +939,9 @@ def gate(book: str, fig_id: str, caption: str, out_path: Path,
 
     if not have_pdf:
         return {"pass": False, "file": None, "attempts": attempts,
-                "escalate": True, "err": "no_pdf_for_extract"}
+                "escalate": True, "err": "no_pdf_for_extract",
+                "qc_degraded": bool(qc_skipped_acc),
+                "qc_skipped": list(qc_skipped_acc)}
 
     # Step 2: raw page candidates
     cands = extract_raw_candidates(pdf_path, page_idx)
@@ -911,6 +957,7 @@ def gate(book: str, fig_id: str, caption: str, out_path: Path,
             if not extract_xref_image(pdf_path, c["xref"], tmp):
                 continue
         ok, reasons = run_local_qc(tmp, caption, pdf_path, page_idx, c["bbox"])
+        _track_qc(reasons)
         attempts.append({"src": f"raw_xref_{c['xref']}", "pass": ok,
                          "reasons": reasons, "bbox": c["bbox"]})
         log_qc(book, ok, reasons, method="raw_xref")
@@ -918,7 +965,9 @@ def gate(book: str, fig_id: str, caption: str, out_path: Path,
             tmp.replace(out_path)
             return {"pass": True, "file": str(out_path), "attempts": attempts,
                     "escalate": False, "match_method": "raw_xref",
-                    "fig_id_normalized": fig_norm}
+                    "fig_id_normalized": fig_norm,
+                    "qc_degraded": bool(qc_skipped_acc),
+                    "qc_skipped": list(qc_skipped_acc)}
         try:
             tmp.unlink()
         except Exception:
@@ -937,6 +986,7 @@ def gate(book: str, fig_id: str, caption: str, out_path: Path,
                              "reasons": ["render_failed"], "bbox": bbox})
             continue
         ok, reasons = run_local_qc(tmp, caption, pdf_path, page_idx, bbox)
+        _track_qc(reasons)
         attempts.append({"src": f"ollama_retry_{retry}", "pass": ok,
                          "reasons": reasons, "bbox": bbox})
         log_qc(book, ok, reasons, method="ollama_retry")
@@ -944,14 +994,18 @@ def gate(book: str, fig_id: str, caption: str, out_path: Path,
             tmp.replace(out_path)
             return {"pass": True, "file": str(out_path), "attempts": attempts,
                     "escalate": False, "match_method": "ollama_retry",
-                    "fig_id_normalized": fig_norm}
+                    "fig_id_normalized": fig_norm,
+                    "qc_degraded": bool(qc_skipped_acc),
+                    "qc_skipped": list(qc_skipped_acc)}
         try:
             tmp.unlink()
         except Exception:
             pass
 
     # Step 4: escalate
-    return {"pass": False, "file": None, "attempts": attempts, "escalate": True}
+    return {"pass": False, "file": None, "attempts": attempts, "escalate": True,
+            "qc_degraded": bool(qc_skipped_acc),
+            "qc_skipped": list(qc_skipped_acc)}
 
 
 # ─── CLI ──────────────────────────────────────────────────────────────────────

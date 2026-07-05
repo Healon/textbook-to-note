@@ -105,7 +105,7 @@ textbook-md/
 │   ├── ch02_....md
 │   ├── full_text.md
 │   └── figures/                   ← LEGACY ONLY — not produced by conversion
-└── misc/                          ← single-file conversions without an explicit output path
+└── Another_Book/                  ← single-file conversions use the same <book>/full_text.md layout
 ```
 
 Figure-registry generation (`figure_registry.json`) is an optional external
@@ -306,4 +306,4 @@ conversions:
 python {REPO}/converter/convert.py "path/to/any.pdf" "path/to/output.md" --book-label "Book Name — Chapter"
 ```
 
-Output goes to `textbook-md/misc/` if no output path is specified.
+If no output path is specified, output goes to `OUTPUT_DIR/<pdf name>/full_text.md` — the same layout `--batch-dir` uses, so a later batch run skips it as already converted.

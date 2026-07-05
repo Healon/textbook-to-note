@@ -24,7 +24,11 @@ Contract returned to the workflow (and ONLY this):
     "hard_fail": bool,            # strict deterministic miss (never a wrong raster)
     "file": "<path>" | None,      # set only when status == pass
     "fig_id": "<normalized>",     # canonical dot id actually matched on
-    "reason": "<text>"            # set on fail/escalate
+    "reason": "<text>",           # set on fail/escalate
+    "qc_degraded": bool,          # true when a QC check had to skip (PIL/numpy
+                                   # missing, no PDF context, ollama unreachable)
+                                   # and defaulted to pass instead of a real verdict
+    "qc_skipped": ["<check>", ...]  # which check(s) skipped; [] when qc_degraded is False
   }
 
 The precise engine method (geometric_match / raw_xref / ollama_retry / existing /
@@ -110,7 +114,8 @@ def _detect_multipanel_caption(caption: str) -> bool:
 # exercise. Any key not in CONTRACT_KEYS is rejected, which structurally forbids
 # leaking the engine axis (match_method/attempts/bbox/escalate/pass).
 CONTRACT_KEYS = frozenset({"status", "match_quality", "hard_fail",
-                           "file", "fig_id", "reason"})
+                           "file", "fig_id", "reason",
+                           "qc_degraded", "qc_skipped"})
 _STATUS = frozenset({"pass", "fail", "escalate"})
 _QUALITY = frozenset({"exact", "uncertain", "failed"})
 
@@ -129,6 +134,10 @@ def _validate(c: dict) -> dict:
             f"contract violation: bad match_quality {c['match_quality']!r}")
     if not isinstance(c["hard_fail"], bool):
         raise RuntimeError("contract violation: hard_fail must be bool")
+    if not isinstance(c["qc_degraded"], bool):
+        raise RuntimeError("contract violation: qc_degraded must be bool")
+    if not isinstance(c["qc_skipped"], list):
+        raise RuntimeError("contract violation: qc_skipped must be a list")
     return c
 
 
@@ -177,6 +186,7 @@ def extract(book: str, fig_id: str, caption: str, out: str | Path,
         # bbox=None: pre-extract isn't tied to a known page bbox, so text_bleed
         # check is skipped — whitespace + contamination still apply.
         ok, reasons = _impl.run_local_qc(existing_path, caption, pdf, page_idx, None)
+        degraded, skipped = _impl.qc_degradation(reasons)
         if ok:
             out_path.parent.mkdir(parents=True, exist_ok=True)
             if existing_path != out_path:
@@ -187,18 +197,21 @@ def extract(book: str, fig_id: str, caption: str, out: str | Path,
             return _validate({"status": "pass", "match_quality": "exact",
                               "hard_fail": False, "file": str(out_path),
                               "fig_id": fig_norm,
-                              "reason": f"source=existing_authoritative ({existing_path.name})"})
+                              "reason": f"source=existing_authoritative ({existing_path.name})",
+                              "qc_degraded": degraded, "qc_skipped": skipped})
         if source == "existing":
             fig_norm = _impl.normalize_fig_id(fig_id or "")
             return _validate({"status": "fail", "match_quality": "failed",
                               "hard_fail": True, "file": None, "fig_id": fig_norm,
-                              "reason": f"source=existing QC fail: {'; '.join(reasons)}"})
+                              "reason": f"source=existing QC fail: {'; '.join(reasons)}",
+                              "qc_degraded": degraded, "qc_skipped": skipped})
         # source=auto + existing QC fail → fall through to PDF path.
     elif source == "existing":
         fig_norm = _impl.normalize_fig_id(fig_id or "")
         return _validate({"status": "fail", "match_quality": "failed",
                           "hard_fail": True, "file": None, "fig_id": fig_norm,
-                          "reason": "source=existing but no pre-extracted file found"})
+                          "reason": "source=existing but no pre-extracted file found",
+                          "qc_degraded": False, "qc_skipped": []})
 
     # Policy-level routing: multi-panel captions break strict ownership model.
     # Auto-relax (no special-case fallback — this is correct routing, not retry).
@@ -240,6 +253,8 @@ def extract(book: str, fig_id: str, caption: str, out: str | Path,
             raw["reason"] = f"{base}; neighbor sweep tried pages {neighbor_tries}"
 
     fig_norm = raw.get("fig_id_normalized") or _impl.normalize_fig_id(fig_id or "")
+    qc_degraded = bool(raw.get("qc_degraded", False))
+    qc_skipped = list(raw.get("qc_skipped", []))
     if raw.get("pass"):
         # exact = any deterministic backend (geometric_match OR caption_anchor,
         # both produce ambiguity-safe crops from a deterministic anchor).
@@ -248,19 +263,23 @@ def extract(book: str, fig_id: str, caption: str, out: str | Path,
         method = raw.get("match_method")
         quality = "exact" if method in ("geometric_match", "caption_anchor") else "uncertain"
         contract = {"status": "pass", "match_quality": quality, "hard_fail": False,
-                    "file": raw.get("file"), "fig_id": fig_norm, "reason": ""}
+                    "file": raw.get("file"), "fig_id": fig_norm, "reason": "",
+                    "qc_degraded": qc_degraded, "qc_skipped": qc_skipped}
     elif raw.get("hard_fail"):
         contract = {"status": "fail", "match_quality": "failed", "hard_fail": True,
                     "file": None, "fig_id": fig_norm,
-                    "reason": raw.get("reason", "strict deterministic miss")}
+                    "reason": raw.get("reason", "strict deterministic miss"),
+                    "qc_degraded": qc_degraded, "qc_skipped": qc_skipped}
     elif raw.get("escalate"):
         contract = {"status": "escalate", "match_quality": "failed", "hard_fail": False,
                     "file": None, "fig_id": fig_norm,
-                    "reason": raw.get("err") or "gate exhausted; needs frontier-model vision bbox"}
+                    "reason": raw.get("err") or "gate exhausted; needs frontier-model vision bbox",
+                    "qc_degraded": qc_degraded, "qc_skipped": qc_skipped}
     else:
         contract = {"status": "fail", "match_quality": "failed", "hard_fail": False,
                     "file": None, "fig_id": fig_norm,
-                    "reason": raw.get("err", "extraction failed")}
+                    "reason": raw.get("err", "extraction failed"),
+                    "qc_degraded": qc_degraded, "qc_skipped": qc_skipped}
 
     # Surface policy routing in the reason field for audit trail. Workflows can
     # ignore; per-book QC log retains full provenance.

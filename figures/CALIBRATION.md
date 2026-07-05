@@ -106,6 +106,19 @@ needed. Two things to know when calibrating:
    `diagnostic_dump()` will show you sample missed captions — use that to
    spot systematic format mismatches instead of debugging figure-by-figure.
 
+## QC thresholds
+
+Thresholds like `WHITESPACE_FILL_MIN` are env-configurable (e.g.
+`T2N_QC_WHITESPACE_MIN`) so you can loosen them for special content types —
+line-art-heavy books with large legitimate internal whitespace, for
+instance. But **never tune a threshold just to make one failing figure
+pass** — a threshold change is global and risks masking a real QC failure on
+every other book. If a single figure fails, re-extract it (check page
+offset, caption match, backend selection per the sections above) instead of
+loosening the gate. Only change the env value when you've calibrated it
+against a whole book's figure set and confirmed the looser threshold doesn't
+let genuine failures through.
+
 ## Placeholder examples used above
 
 Where this guide says "an older edition scanned to PDF" or "a label-dense

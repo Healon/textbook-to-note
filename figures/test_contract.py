@@ -16,6 +16,17 @@ fig_id. Point T2N_TEST_PDF at that PDF and set T2N_TEST_FIG_ID / T2N_TEST_PAGE
 / T2N_TEST_CAPTION / T2N_TEST_BOOK to match; if T2N_TEST_PDF is unset, those
 checks SKIP (not fail) so the suite is runnable with no fixture at all.
 
+Minimum fixture requirements for the FULL suite (all of 2-5) to actually run
+rather than partially skip:
+  - the document must have a page at least FAR_OFF_MIN_DIST (3) pages away
+    from T2N_TEST_PAGE in either direction (i.e. TEST_PAGE - 3 >= 1, or the
+    document has >= TEST_PAGE + 3 pages) — check 3 (far-off hard_fail) SKIPs
+    with a message if no such page exists (e.g. a document with < 4 pages
+    total when TEST_PAGE is page 1).
+  - T2N_TEST_FIG_ID's figure must sit on T2N_TEST_PAGE with an unambiguous,
+    deterministically-matchable caption↔raster pair (checks 2, 4, 5 depend on
+    this).
+
   python test_contract.py   → exit 0 all pass/skip · exit 1 any FAIL
 """
 from __future__ import annotations
@@ -37,7 +48,30 @@ TEST_PAGE = int(os.environ.get("T2N_TEST_PAGE", "1"))
 TEST_CAPTION = os.environ.get("T2N_TEST_CAPTION", "")
 
 OUT = HERE / "_test_contract_tmp.jpeg"
-CONTRACT_KEYS = {"status", "match_quality", "hard_fail", "file", "fig_id", "reason"}
+CONTRACT_KEYS = {"status", "match_quality", "hard_fail", "file", "fig_id",
+                 "reason", "qc_degraded", "qc_skipped"}
+
+# A far-off page must be at least this many pages from TEST_PAGE, else the
+# extractor's ±1 neighbor sweep can land back on TEST_PAGE and flip the
+# expected hard_fail into a pass (see check 3 below).
+FAR_OFF_MIN_DIST = 3
+
+
+def _far_off_page(pdf_path: str, base_page: int, min_dist: int = FAR_OFF_MIN_DIST) -> int | None:
+    """Pick a page >= min_dist away from base_page (1-indexed), clamped to the
+    document's actual page count. Returns None if the document is too short
+    to place such a page in either direction."""
+    import fitz
+    doc = fitz.open(pdf_path)
+    total = doc.page_count
+    doc.close()
+    candidate = base_page - min_dist
+    if candidate >= 1:
+        return candidate
+    candidate = base_page + min_dist
+    if candidate <= total:
+        return candidate
+    return None
 
 results = []  # (name, "PASS"|"FAIL"|"SKIP", detail)
 
@@ -68,7 +102,8 @@ def _raises(d):
 
 
 _good = {"status": "pass", "match_quality": "exact", "hard_fail": False,
-         "file": "x", "fig_id": "1.1", "reason": ""}
+         "file": "x", "fig_id": "1.1", "reason": "",
+         "qc_degraded": False, "qc_skipped": []}
 check("_validate accepts clean contract", fr._validate(_good) == _good)
 check("_validate rejects leaked match_method", _raises({**_good, "match_method": "raw_xref"}))
 check("_validate rejects bad status", _raises({**_good, "status": "ok"}))
@@ -102,15 +137,24 @@ if TEST_PDF and Path(TEST_PDF).exists():
     OUT.unlink(missing_ok=True)
     OUT.with_suffix(".geo.jpeg").unlink(missing_ok=True)
 
-    # 3. far-off page → hard-fail (no silent wrong raster; sweep can't help)
-    r2 = fr.extract(book=TEST_BOOK, fig_id=TEST_FIG_ID, caption=TEST_CAPTION,
-                    out=OUT, pdf=TEST_PDF, page=max(1, TEST_PAGE - 5))
-    check("far-off page → status fail + hard_fail true + no file",
-          r2.get("status") == "fail" and r2.get("hard_fail") is True
-          and r2.get("file") is None,
-          f"got status={r2.get('status')} hard_fail={r2.get('hard_fail')} file={r2.get('file')}")
-    OUT.unlink(missing_ok=True)
-    OUT.with_suffix(".geo.jpeg").unlink(missing_ok=True)
+    # 3. far-off page → hard-fail (no silent wrong raster; sweep can't help).
+    # Must be >= FAR_OFF_MIN_DIST pages away — the extractor auto-sweeps ±1
+    # neighbor pages, so a page only a few pages off (on a short document)
+    # could land inside that sweep and wrongly pass.
+    far_page = _far_off_page(TEST_PDF, TEST_PAGE)
+    if far_page is None:
+        skip("far-off page → status fail + hard_fail true + no file",
+             f"document too short to place a page >= {FAR_OFF_MIN_DIST} "
+             f"pages from TEST_PAGE={TEST_PAGE} in either direction")
+    else:
+        r2 = fr.extract(book=TEST_BOOK, fig_id=TEST_FIG_ID, caption=TEST_CAPTION,
+                        out=OUT, pdf=TEST_PDF, page=far_page)
+        check("far-off page → status fail + hard_fail true + no file",
+              r2.get("status") == "fail" and r2.get("hard_fail") is True
+              and r2.get("file") is None,
+              f"got status={r2.get('status')} hard_fail={r2.get('hard_fail')} file={r2.get('file')} far_page={far_page}")
+        OUT.unlink(missing_ok=True)
+        OUT.with_suffix(".geo.jpeg").unlink(missing_ok=True)
 
     # 5. neighbor sweep: off-by-one page should still pass (sweeps back to TEST_PAGE)
     r3 = fr.extract(book=TEST_BOOK, fig_id=TEST_FIG_ID, caption=TEST_CAPTION,

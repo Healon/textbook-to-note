@@ -81,8 +81,13 @@ textbook-md/
 │   ├── ch01_Introduction.md
 │   ├── ch02_....md
 │   └── full_text.md
-└── misc/
+└── Another_Book/
+    └── ...
 ```
+
+Single-file conversions without an explicit output path land in the same
+`<book>/full_text.md` layout, so a later `--batch-dir` run recognizes them
+as already converted.
 
 This corpus is **for the agent's own reference**, not meant to be read by a
 human — it's the substrate the note-writing workflow searches.

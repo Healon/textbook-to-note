@@ -8,7 +8,7 @@ markdown in ./output.
 Env overrides:
     BOOKS_DIR           -> source PDFs/EPUBs (default: ./books)
     OUTPUT_DIR          -> markdown output root (default: ./output)
-    SURYA_VENV_PY       -> path to a Surya OCR venv's python.exe (optional)
+    SURYA_VENV_PY       -> path to a Surya OCR venv's Python interpreter (python.exe on Windows, bin/python on macOS/Linux) (optional)
     SURYA_ADAPTER       -> path to a Surya adapter script (optional)
     INDEXER_SCRIPT      -> path to an external semantic indexer script (optional)
     VAULT_SEARCH_DIR    -> cache/index dir for an external indexer (optional)

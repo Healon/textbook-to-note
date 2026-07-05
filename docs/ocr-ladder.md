@@ -3,6 +3,29 @@
 Principle: minimize vision-model tokens. Extract text locally first; only
 send an image to a hosted LLM as the absolute last resort.
 
+## Choosing your hardware tier
+
+The zero-setup `fitz`-only default (step 1 below) is the **right** starting
+point for born-digital ebooks — most personal libraries are mostly
+born-digital, and `fitz` alone handles them at essentially no cost. The rest
+of the ladder (steps 2-5) is **opt-in**, only needed once you actually have
+scanned books to process. Which of those opt-in steps are practical depends
+on your hardware:
+
+| Tier | Text (born-digital) | OCR (scanned) | Vision QC model (ollama) | Embedding (semantic index) | Skip / caveats |
+|---|---|---|---|---|---|
+| No GPU (CPU-only) | fitz — full speed, this is your whole pipeline | None practical. Surya-CPU only for a few short scans. Send rare scanned pages to frontier vision or skip. | Skip local vision QC → rely on deterministic QC only | bge-m3 on CPU OK for a small library, else grep-only | Don't install Surya/Paddle. Accept: scanned books aren't locally OCR-able. |
+| Apple Silicon 8 GB | fitz | Surya on MPS (~1-3 pg/s) | minicpm-v:8b Q4 is tight in 8 GB unified; prefer a smaller VLM (e.g. llava-phi3, moondream) or run OCR and QC sequentially | bge-m3 via ollama Metal | Avoid PaddleOCR-VL (poor Metal support) |
+| Apple Silicon 16 GB+ | fitz | Surya (MPS) | minicpm-v:8b comfortable | bge-m3 | PaddleOCR still Mac-weak — leave it off |
+| NVIDIA 8 GB | fitz | Surya (batch 8-16) → PaddleOCR-VL fallback | minicpm-v:8b Q4 (~6 GB) — load sequentially, not concurrent with Surya | bge-m3 | Don't hold OCR + vision + embed resident at once |
+| NVIDIA 16 GB+ | fitz | Surya (large batch) → PaddleOCR-VL | minicpm-v:8b at higher precision, or qwen2.5-vl:7b | bge-m3 (can stay resident) | Everything concurrent; reference tier |
+
+Speed anchors to set expectations before committing a whole library to a
+method: `fitz` text extraction runs ≫50 pages/s; a `pdfplumber` table pass
+runs 2-10 pages/s; Surya on GPU runs ~1-4 pages/s vs ~0.05-0.2 pages/s on
+CPU (impractical for whole books — CPU Surya is for a handful of pages, not
+a library); a local VLM QC pass runs ~3-8 s/figure.
+
 ## The ladder
 
 | Priority | Method | Cost | Notes |
