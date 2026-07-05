@@ -1,0 +1,16 @@
+# Core converter dependencies
+pymupdf>=1.23        # imported as `fitz` — PDF text/image/bookmark extraction
+pdfplumber>=0.10      # table extraction from PDF pages
+Pillow>=10.0          # image mode conversion / inversion (scan_fix_negatives.py)
+numpy>=1.24           # image histogram checks (scan_fix_negatives.py)
+
+# Optional extras (only needed if you use the matching feature):
+#   epub conversion (convert.py convert_epub)     -> requires the `pandoc` CLI on PATH (not a pip package)
+#   Surya OCR fallback (convert.py surya_ocr_pdf) -> a Surya OCR install in a separate venv,
+#                                                     configured via SURYA_VENV_PY / SURYA_ADAPTER
+#   ollama vision verification (scan_fix_negatives.py --verify-dark) -> requests, plus a local
+#                                                     ollama server with a vision model pulled
+#       requests>=2.31
+#   external semantic indexer / lancedb coverage audit (post_convert.py) -> lancedb, plus
+#                                                     your own indexer script (see shared/config.py)
+#       lancedb

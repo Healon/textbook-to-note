@@ -1,0 +1,25 @@
+# User content — never commit book files or generated output
+books/
+output/
+cache/
+*.pdf
+*.epub
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Local config / secrets
+.env
+
+# Logs and scratch
+*.log
+logs/
+_render_cache/
+.drafts/
+
+# OS noise
+.DS_Store
+Thumbs.db
