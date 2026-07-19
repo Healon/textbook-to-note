@@ -4,6 +4,14 @@ Turn your own PDF textbooks into an AI-searchable knowledge base and structured,
 
 [繁體中文說明 → README.zh-TW.md](README.zh-TW.md)
 
+## Why I built this
+
+I've loved taking notes since med school, and over the years I've built up thousands of them — but I can no longer keep every one at the same quality by hand. In an age of information overload, trustworthy high-quality sources become the precious thing, and textbooks are among the best; yet my specialty alone has 40+ designated reference books, with a single concept scattered across chapters in many of them. Reading them all cover to cover just isn't realistic. LLMs are great at long context, but you can't dump hundreds of books on one at once — so the real unlock is pairing good search and a database with teaching the AI my own note-making process, so it produces grounded, structured notes I only have to absorb.
+
+![A note template on the left, the note the pipeline produced from it on the right](docs/assets/template-vs-note.png)
+
+*Left: one of the templates in [`templates/`](templates/). Right: a real note in my vault, written against it — every claim traceable, every section where I expect it.*
+
 ## Why this is hard (and why naive approaches fail)
 
 Feeding a raw PDF to a frontier model seems simple until you hit the real problems:
@@ -41,7 +49,7 @@ Cross-book search runs on the same engine as its sibling project [**vault-search
 Note quality comes from the workflow, not the model:
 
 - **Blind draft first** — the AI researches the topic fully from the textbook corpus *before* looking at any existing note, so an old note's structure and content can't bias the new draft. Merge comes last.
-- **Template-driven extraction** — each topic type has a fixed template. This is load-bearing: it tells the AI exactly what to hunt for in the source, and it means every note has the same predictable shape so *you* read faster. Sections like a leading Summary and a Management-algorithm block exist specifically to aid comprehension, not just to hold data.
+- **Template-driven extraction** — each topic type has a fixed template. This is load-bearing: it tells the AI exactly what to hunt for in the source, and it means every note has the same predictable shape so *you* read faster. Sections like a leading Summary and a Management-algorithm block exist specifically to aid comprehension, not just to hold data. The exact templates used daily are included under [`templates/`](templates/), in both the original 繁體中文 and an English translation.
 - **Cite or it didn't happen** — every claim carries book + chapter; anything the AI adds from its own knowledge is explicitly flagged as inferred.
 - **Non-destructive merge** — replacing an existing note is gated on your vault being under version control; otherwise it writes a draft beside the original. It will not silently overwrite your hand-written notes.
 
@@ -55,7 +63,9 @@ When a specific book extracts wrong, you fix *that book's* logic once, and every
 
 ### Bonus · Pluggable evidence enrichment
 
-The note workflow has optional hook points to enrich a draft from external sources — a clinical-evidence API, a regulations/coverage database, a literature search. These are kept out of this repo to bound its scope; the workflow doc marks exactly where they slot in so you can wire in your own domain's sources.
+The note workflow has optional hook points to enrich a draft from external sources — a clinical-evidence API, a regulations/coverage database, a literature search. They live outside this repo to bound its scope; the workflow doc marks exactly where they slot in so you can wire in your own domain's sources.
+
+The clinical-evidence hook I use daily is published separately as [**openevidence-tools**](https://github.com/drpwchen/openevidence-tools) — an OpenEvidence ask tool paired with a verifier that checks the returned citations. It takes [htlin222/openevidence-mcp](https://github.com/htlin222/openevidence-mcp) as its reference and inspiration; it is not a fork. **Always run the verify step** — cited sources can be wrong.
 
 ## Designed to be deployed by an AI
 
@@ -98,6 +108,7 @@ This tool ships **no textbook content**. It operates on PDFs you already own —
 ## Related
 
 - [**vault-search**](https://github.com/drpwchen/vault-search) — the local semantic-search engine stage 3 builds on.
+- [**openevidence-tools**](https://github.com/drpwchen/openevidence-tools) — the OpenEvidence ask + verify pair that plugs into the Bonus stage.
 
 ## License
 

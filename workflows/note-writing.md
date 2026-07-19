@@ -55,6 +55,9 @@ like:
 Adapt the table to your own domain's actual note types — the underlying
 principle is: **pick the template from the topic's shape, not from habit**,
 and ask the user if a topic could plausibly fit more than one template.
+See [`templates/`](../templates/) for a real, in-production set of five
+medical-note templates (zh-TW + English) showing this row-to-template
+mapping concretely, plus notes on adapting them to another field.
 
 If the topic is a spatial/positional reference with no natural narrative
 structure, ask the user up front which top-level axis to organize by (e.g.

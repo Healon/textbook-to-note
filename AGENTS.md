@@ -17,6 +17,7 @@ converter/    — PDF/EPUB → markdown conversion (0 LLM tokens)
 figures/      — on-demand figure extraction with QC gating
 skills/       — two Claude Code skill definitions (drop-in to ~/.claude/skills/)
 workflows/    — the note-writing workflow specification
+templates/    — real production note templates (zh-TW + English) for Step 1.1's topic-type table
 docs/         — architecture + OCR-ladder reference docs
 examples/     — one example output note showing the target format
 shared/       — shared config (paths, env var names)
