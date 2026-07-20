@@ -70,6 +70,22 @@ a `full_text.md`, with:
   intervening heading), a repeated header row is deduped, and a
   `<!-- table continues from page N -->` comment preserves page-traceability.
   Default OFF (exact-fallback: byte-identical output when disabled).
+- Page-frame pseudo-tables rejected. A content frame plus the rule under a
+  running header gives `pdfplumber` enough intersecting edges to return one
+  "table" spanning the page body with 1 column, into whose single cell every
+  word on the page is dumped. Candidates of 1 column whose largest cell
+  exceeds `TABLE_FRAME_CELL_CHARS` (500) or whose bbox covers
+  `TABLE_FRAME_AREA_FRAC` (0.50) of the page are dropped, leaving a
+  `<!-- ⚠️ page-frame pseudo-table rejected on page N (reason) -->` comment so
+  the removal is auditable. Column count is the only gate, so a table whose
+  columns pdfplumber actually resolved is never at risk. Default ON
+  (`T2N_TABLE_FRAME_REJECT=0` restores the previous behaviour).
+- Whole-book table-failure detection. If `pdfplumber` parses 0 pages while
+  `fitz` opens the file, or the book yields 0 tables despite
+  `BOOK_ZERO_TABLE_MIN_CAPTIONS` (10) table captions, or pages raised errors
+  during the table pass, a `> [!warning]` block is written at the top of the
+  markdown and the warnings are surfaced in the batch report. Pure detection —
+  extraction is unchanged (`T2N_BOOK_TABLE_CHECK=0` to disable).
 - `<!-- REF: Fig. X.Y → see PDF page N -->` markers wherever the text
   references a figure or table, so downstream steps know where to look in
   the source PDF without re-scanning it

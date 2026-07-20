@@ -313,14 +313,74 @@ def _table_to_md(table) -> str | None:
     return "\n".join(lines)
 
 
-def extract_tables_md(plumber_page) -> list[str]:
-    """Extract tables from a pdfplumber page, return as markdown strings."""
-    md_tables = []
-    for table in plumber_page.extract_tables():
-        md = _table_to_md(table)
-        if md:
-            md_tables.append(md)
-    return md_tables
+# === Fix 1: page-frame pseudo-table rejection ===
+# Page-decoration rectangles (typically a running-header box plus a full-page content frame) give
+# pdfplumber >= 2 horizontal and >= 2 vertical intersecting edges, so find_tables() returns ONE
+# table whose bbox is the whole page body with rows=2, cols=1 — and every word on the page lands in
+# that single cell, in raw left-to-right order. Three different things arrive through that door,
+# all of them defective output:
+#   A. a REAL multi-column table collapsed into 1 column, its columns interleaved line by line.
+#      This is the worst failure in the corpus: the caption and every cell value survive, so it
+#      reads as clean citable data, but the row<->column binding is destroyed and nothing signals
+#      it (a sensitivity can end up spliced into the middle of another test's description).
+#   B. ordinary prose, a figure, or a title page fabricated as a table.
+#   C. a legitimate single-column boxed list, which a 1-column markdown table reproduces faithfully
+#      — and also entirely redundantly, since a 1-column table encodes no column bindings at all.
+# All three are dropped. Measured on 34 rendered pages across 10 books (see wp3-fixes-report.md):
+# 19 Class A, 9 Class B, 6 Class C; and 100% of Class C / 97% of Class A distinct tokens are
+# already present in the page prose render_page_text() emitted immediately above, so the drop
+# removes a misleading duplicate rather than content. Class C is the reason the predicate is not
+# tightened further: bbox coverage does NOT separate A from C (measured A 0.13-0.73 of page area,
+# C 0.09-0.47), so requiring "bbox covers most of the page" would spare 6 harmless boxed lists at
+# the cost of leaving 13 of 19 Class A collapses in place.
+#
+# Kill-switch: set T2N_TABLE_FRAME_REJECT=0 to restore the old (defective) behavior. Defaults ON,
+# unlike T2N_TABLE_MERGE — this is a bug fix to wrong output, not a new capability.
+TABLE_FRAME_MAX_COLS = 1       # normalized column count at/below which a table encodes no structure
+TABLE_FRAME_CELL_CHARS = 500   # a single cell this long is a page-body dump, not a table cell
+TABLE_FRAME_AREA_FRAC = 0.50   # ...or the bbox alone already covers this much of the page
+
+
+def page_frame_reject_reason(rows, bbox, page_w: float, page_h: float) -> str | None:
+    """Reason string if this candidate table is a page-frame pseudo-table that should be discarded,
+    else None. Only ever fires on tables of TABLE_FRAME_MAX_COLS columns or fewer, so a table whose
+    columns pdfplumber actually resolved is never at risk."""
+    if os.environ.get("T2N_TABLE_FRAME_REJECT", "1") == "0":
+        return None
+    if not rows:
+        return None
+    if max((len(r) for r in rows), default=0) > TABLE_FRAME_MAX_COLS:
+        return None
+    max_chars = max((len(str(c)) for r in rows for c in r if c), default=0)
+    if max_chars > TABLE_FRAME_CELL_CHARS:
+        return f"single column, {max_chars}-char cell"
+    if bbox and page_w > 0 and page_h > 0:
+        x0, top, x1, bottom = (float(v) for v in bbox)
+        area = ((x1 - x0) * (bottom - top)) / (page_w * page_h)
+        if area >= TABLE_FRAME_AREA_FRAC:
+            return f"single column, bbox covers {area:.0%} of page"
+    return None
+
+
+def extract_tables_md(plumber_page) -> tuple[list[str], list[str]]:
+    """Extract tables from a pdfplumber page. Returns (markdown tables, rejection reasons).
+    find_tables() is used rather than extract_tables() only to get each table's bbox — pdfplumber
+    defines extract_tables() as exactly [t.extract() for t in find_tables()], so the extracted rows
+    are identical."""
+    md_tables, rejects = [], []
+    page_w = float(plumber_page.width or 0)
+    page_h = float(plumber_page.height or 0)
+    for table in plumber_page.find_tables():
+        rows = table.extract()
+        md = _table_to_md(rows)
+        if not md:
+            continue
+        reason = page_frame_reject_reason(rows, getattr(table, "bbox", None), page_w, page_h)
+        if reason:
+            rejects.append(reason)
+            continue
+        md_tables.append(md)
+    return md_tables, rejects
 
 
 # === Improvement 3: cross-page table merging ===
@@ -368,13 +428,14 @@ def _looks_like_heading(s: str) -> bool:
     return False
 
 
-def _gather_page_tables(plumber_page, fitz_page, page_num: int) -> list[dict]:
+def _gather_page_tables(plumber_page, fitz_page, page_num: int) -> tuple[list[dict], list[str]]:
     """Find tables on a page with the geometry the merge pass needs: markdown, normalized column
     count, column left-x edges, bbox, page size, and whether a body heading sits above/below the
-    table (running headers/footers in the margin bands are excluded)."""
+    table (running headers/footers in the margin bands are excluded). Returns (tables, page-frame
+    rejection reasons)."""
     found = plumber_page.find_tables()
     if not found:
-        return []
+        return [], []
 
     page_w = float(fitz_page.rect.width)
     page_h = float(fitz_page.rect.height)
@@ -396,10 +457,17 @@ def _gather_page_tables(plumber_page, fitz_page, page_num: int) -> list[dict]:
                 heading_ys.append(yc)
 
     out = []
+    rejects = []
     for t in found:
         rows = t.extract()
         md = _table_to_md(rows)
         if not md:
+            continue
+        # Same page-frame reject as the plain path, so the merge path cannot resurrect the defect
+        # (and cannot stitch two page-frame pseudo-tables into an even larger one).
+        reason = page_frame_reject_reason(rows, getattr(t, "bbox", None), page_w, page_h)
+        if reason:
+            rejects.append(reason)
             continue
         cells = [c for c in (getattr(t, "cells", None) or []) if c]
         xedges = sorted({round(c[0], 1) for c in cells})
@@ -417,7 +485,7 @@ def _gather_page_tables(plumber_page, fitz_page, page_num: int) -> list[dict]:
             "heading_above": any(y < bbox[1] for y in heading_ys),
             "heading_below": any(y > bbox[3] for y in heading_ys),
         })
-    return out
+    return out, rejects
 
 
 def _xedges_match(xa: list, xb: list, bbox_a: tuple, bbox_b: tuple, page_w: float) -> bool:
@@ -506,6 +574,28 @@ def merge_page_tables(page_tables: list[list[dict]]) -> dict:
     return emit
 
 
+# === Fix 2: whole-book table-failure detection ===
+# The per-book failure is bimodal: a book either extracts tables fine or loses every single one,
+# silently. Corpus audit (wp3-borderless-report.md §2): 34 of 260 converted books ship markdown with
+# zero extracted tables, the largest carrying 274 / 239 / 218 / 142 / 128 / 95 table captions each.
+# Causes are mixed — pdfplumber parsing 0 pages where fitz reads the file fine, ruling lines drawn
+# as sub-3pt dash segments, and genuinely borderless tables — but the symptom is uniform and, until
+# now, produced no error at all. These checks change nothing about extraction; they only make the
+# loss loud, in the conversion report and in the markdown itself.
+#
+# N = 10 captions. Rationale, measured over 260 books: books with tables can never trip this check
+# (total_tables == 0 short-circuits it), so N only governs false alarms among the 34 zero-table
+# books. At N = 10 the check fires on 22 of those 34, including every one of the six largest; the
+# 12 it spares all have <= 9 caption hits and are mostly ultrasound/manual-therapy atlases where
+# that count is plausibly cross-references ("as listed in Table 5.2") rather than real tables. The
+# caption regex deliberately over-counts, so a low N would convert genuine table-free books into
+# recurring false warnings and the check would stop being read.
+#
+# Kill-switch: T2N_BOOK_TABLE_CHECK=0. Defaults ON — detection only, no extraction change.
+BOOK_ZERO_TABLE_MIN_CAPTIONS = 10
+TABLE_CAPTION_RE = re.compile(r'^\s*(?:TABLE|Table)\s+\d+[.\-]\d+', re.M)
+
+
 # === Core conversion ===
 def render_page_text(page, page_num: int) -> tuple[str, int]:
     """Extracted, cleaned, column-sorted, fig-ref-annotated text for one page + its fig-ref count.
@@ -527,9 +617,14 @@ def convert_pdf(pdf_path: str, out_path: str, book_label: str) -> dict:
 
     output = [f"# {book_label}\n"]
     output.append(f"Source: `{pdf_path}`\n")
+    warn_slot = len(output)  # book-level warnings are spliced in here once the pass is done
 
     total_tables = 0
     total_fig_refs = 0
+    total_rejected = 0
+    total_captions = 0
+    page_errors = []  # (page_num, exc_type, message) — counted, never swallowed
+    detect_on = os.environ.get("T2N_BOOK_TABLE_CHECK", "1") != "0"
     table_gate_on = os.environ.get("T2N_TABLE_GATE", "1") != "0"
     merge_on = os.environ.get("T2N_TABLE_MERGE", "0") == "1"  # Improvement 3, default OFF
 
@@ -539,19 +634,26 @@ def convert_pdf(pdf_path: str, out_path: str, book_label: str) -> dict:
             # Improvement 1: two-column reading order (exact-fallback inside render_page_text).
             page_text, fig_count = render_page_text(doc[i], i + 1)
             total_fig_refs += fig_count
+            total_captions += len(TABLE_CAPTION_RE.findall(page_text))
 
             output.append(f"\n<!-- page {i+1} -->\n")
             output.append(page_text)
 
             # Improvement 2: only run the expensive pdfplumber pass on pages that plausibly hold a
             # table. Skipped pages never touch plumber.pages[i], so they don't pay the parse cost.
+            md_tables, rejects = [], []
             try:
-                if table_gate_on and not page_has_table_candidate(doc[i], page_text):
-                    md_tables = []
-                else:
-                    md_tables = extract_tables_md(plumber.pages[i])
-            except Exception:
-                md_tables = []
+                if not (table_gate_on and not page_has_table_candidate(doc[i], page_text)):
+                    md_tables, rejects = extract_tables_md(plumber.pages[i])
+            except Exception as e:
+                # Count, don't swallow. A single unparseable page and a wholly unopenable book used
+                # to look identical here (both produced zero tables and zero output); now the page
+                # failures are tallied and reported, and the book-level checks below cover the rest.
+                page_errors.append((i + 1, type(e).__name__, str(e)[:200]))
+            for reason in rejects:
+                total_rejected += 1
+                output.append(f"\n<!-- ⚠️ page-frame pseudo-table rejected on page {i+1} "
+                              f"({reason}) — its text is retained in the page prose above -->")
             for j, tbl in enumerate(md_tables):
                 total_tables += 1
                 output.append(f"\n**[Table on page {i+1}]**\n")
@@ -562,24 +664,30 @@ def convert_pdf(pdf_path: str, out_path: str, book_label: str) -> dict:
         # (merge decisions need the next page's tables), then emit with continuations stitched.
         page_texts = []
         page_tables = []
+        page_rejects = []
         for i in range(total_pages):
             page_text, fig_count = render_page_text(doc[i], i + 1)
             total_fig_refs += fig_count
+            total_captions += len(TABLE_CAPTION_RE.findall(page_text))
             page_texts.append(page_text)
+            tbls, rejects = [], []
             try:
-                if table_gate_on and not page_has_table_candidate(doc[i], page_text):
-                    tbls = []
-                else:
-                    tbls = _gather_page_tables(plumber.pages[i], doc[i], i + 1)
-            except Exception:
-                tbls = []
+                if not (table_gate_on and not page_has_table_candidate(doc[i], page_text)):
+                    tbls, rejects = _gather_page_tables(plumber.pages[i], doc[i], i + 1)
+            except Exception as e:
+                page_errors.append((i + 1, type(e).__name__, str(e)[:200]))
             page_tables.append(tbls)
+            page_rejects.append(rejects)
 
         emit_blocks = merge_page_tables(page_tables)
 
         for i in range(total_pages):
             output.append(f"\n<!-- page {i+1} -->\n")
             output.append(page_texts[i])
+            for reason in page_rejects[i]:
+                total_rejected += 1
+                output.append(f"\n<!-- ⚠️ page-frame pseudo-table rejected on page {i+1} "
+                              f"({reason}) — its text is retained in the page prose above -->")
             for md, cont_pages, anchor_page in emit_blocks.get(i, []):
                 total_tables += 1
                 output.append(f"\n**[Table on page {anchor_page}]**\n")
@@ -588,8 +696,31 @@ def convert_pdf(pdf_path: str, out_path: str, book_label: str) -> dict:
                     output.append(f"<!-- table continues from page {cp} -->")
                 output.append("")
 
+    plumber_pages = len(plumber.pages) if detect_on else None
     doc.close()
     plumber.close()
+
+    # Book-level failure detection (pure detection — nothing about extraction changes here).
+    warnings_out = []
+    if detect_on:
+        if plumber_pages == 0 and total_pages > 0:
+            warnings_out.append(
+                f"pdfplumber parsed 0 pages while fitz opened {total_pages} — the table pass never "
+                f"ran on ANY page of this book, so every table in it is missing from this markdown")
+        elif total_tables == 0 and total_captions >= BOOK_ZERO_TABLE_MIN_CAPTIONS:
+            warnings_out.append(
+                f"0 tables extracted despite {total_captions} table captions in the text — this "
+                f"book's tables are very likely all missing (borderless or sub-3pt ruling lines)")
+        if page_errors:
+            kinds = ", ".join(sorted({k for _, k, _ in page_errors}))
+            warnings_out.append(
+                f"{len(page_errors)} page(s) raised an error during the table pass ({kinds}); "
+                f"first at page {page_errors[0][0]}: {page_errors[0][2]}")
+
+    if warnings_out:
+        block = ["\n> [!warning] Conversion warnings — table extraction is incomplete for this book"]
+        block += [f"> - {w}" for w in warnings_out]
+        output[warn_slot:warn_slot] = ["\n".join(block) + "\n"]
 
     # Write output
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -603,6 +734,10 @@ def convert_pdf(pdf_path: str, out_path: str, book_label: str) -> dict:
         "tables": total_tables,
         "fig_refs": total_fig_refs,
         "size_kb": round(size_kb, 1),
+        "rejected_tables": total_rejected,
+        "table_captions": total_captions,
+        "page_errors": len(page_errors),
+        "warnings": warnings_out,
     }
 
 
@@ -648,6 +783,9 @@ def batch_convert(books: dict, book_keys: list[str]) -> dict:
                 stats["book"] = book["label"]
                 results.append(stats)
                 print(f"  ✓ {pdf.name} ({stats['pages']}p, {stats['tables']}t, {stats['fig_refs']}f, {stats['size_kb']}KB)")
+                for w in stats.get("warnings", []):
+                    print(f"    [WARN] {pdf.name}: {w}")
+                    errors.append(f"[TABLE-WARN] {pdf.name}: {w}")
             except Exception as e:
                 errors.append(f"{pdf.name}: {e}")
                 print(f"  ✗ {pdf.name}: {e}")
@@ -1343,7 +1481,11 @@ def batch_dir_convert(root_dir: Path, force: bool = False, force_surya: bool = F
                 if chapters:
                     add_pdf_bookmarks(str(pdf), chapters)
 
-                print(f"  [{converted + 1}/{len(all_pdfs)}] {pdf.name}: {stats['pages']}p, {stats['tables']}t, {stats['fig_refs']}f", flush=True)
+                rj = f", {stats['rejected_tables']} page-frame rejected" if stats.get("rejected_tables") else ""
+                print(f"  [{converted + 1}/{len(all_pdfs)}] {pdf.name}: {stats['pages']}p, {stats['tables']}t, {stats['fig_refs']}f{rj}", flush=True)
+                for w in stats.get("warnings", []):
+                    print(f"    [WARN] {pdf.stem}: {w}", flush=True)
+                    errors.append(f"[TABLE-WARN] {rel}: {w}")
 
             converted += 1
             total_pages_done += stats["pages"]
@@ -1452,6 +1594,10 @@ def main():
             print(f"Converting: {pdf_path}")
             stats = convert_pdf(pdf_path, out_path, label)
             print(f"[OK] {stats['pages']} pages | {stats['tables']} tables | {stats['fig_refs']} fig refs | {stats['size_kb']} KB")
+            if stats.get("rejected_tables"):
+                print(f"     {stats['rejected_tables']} page-frame pseudo-table(s) rejected")
+            for w in stats.get("warnings", []):
+                print(f"[WARN] {w}")
             print(f"Output: {out_path}")
 
     else:
