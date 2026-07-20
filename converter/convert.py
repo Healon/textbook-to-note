@@ -269,56 +269,256 @@ def page_has_table_candidate(fitz_page, page_text: str) -> bool:
 
 
 # === Table extraction ===
+def _clean_row(row) -> list[str]:
+    """Clean one raw table row (list of cell values) to display strings."""
+    return [
+        (clean_text(str(cell)).replace("\n", " ").strip() if cell is not None else "")
+        for cell in row
+    ]
+
+
+def _table_to_md(table) -> str | None:
+    """Render one raw table (list of rows of cell values) to a markdown table string, or
+    None when the table is too small / too empty to keep. This is the single source of
+    truth for table-cell cleaning + markdown layout, shared by the plain per-page path
+    (extract_tables_md) and the cross-page merge path, so an un-merged table is byte-for-byte
+    identical however it was produced."""
+    if not table or len(table) < 2:
+        return None
+
+    cleaned = [_clean_row(row) for row in table]
+
+    # Filter: keep tables with >5% content cells (low bar — prefer to keep)
+    content_cells = sum(1 for row in cleaned for cell in row if cell.strip())
+    total_cells = sum(len(row) for row in cleaned)
+    if total_cells == 0 or content_cells / total_cells < 0.05:
+        return None
+
+    # Normalize column count
+    max_cols = max(len(r) for r in cleaned)
+    if max_cols == 0:
+        return None
+    for row in cleaned:
+        while len(row) < max_cols:
+            row.append("")
+
+    # Build markdown table
+    lines = []
+    header = cleaned[0]
+    lines.append("| " + " | ".join(header) + " |")
+    lines.append("| " + " | ".join(["---"] * max_cols) + " |")
+    for row in cleaned[1:]:
+        lines.append("| " + " | ".join(row) + " |")
+
+    return "\n".join(lines)
+
+
 def extract_tables_md(plumber_page) -> list[str]:
     """Extract tables from a pdfplumber page, return as markdown strings."""
-    tables = plumber_page.extract_tables()
-    if not tables:
-        return []
-
     md_tables = []
-    for table in tables:
-        if not table or len(table) < 2:
-            continue
-
-        # Clean cells
-        cleaned = []
-        for row in table:
-            cleaned_row = []
-            for cell in row:
-                if cell is None:
-                    cleaned_row.append("")
-                else:
-                    cleaned_row.append(clean_text(str(cell)).replace("\n", " ").strip())
-            cleaned.append(cleaned_row)
-
-        # Filter: keep tables with >5% content cells (low bar — prefer to keep)
-        content_cells = sum(1 for row in cleaned for cell in row if cell.strip())
-        total_cells = sum(len(row) for row in cleaned)
-        if total_cells == 0 or content_cells / total_cells < 0.05:
-            continue
-
-        # Normalize column count
-        max_cols = max(len(r) for r in cleaned)
-        if max_cols == 0:
-            continue
-        for row in cleaned:
-            while len(row) < max_cols:
-                row.append("")
-
-        # Build markdown table
-        lines = []
-        header = cleaned[0]
-        lines.append("| " + " | ".join(header) + " |")
-        lines.append("| " + " | ".join(["---"] * max_cols) + " |")
-        for row in cleaned[1:]:
-            lines.append("| " + " | ".join(row) + " |")
-
-        md_tables.append("\n".join(lines))
-
+    for table in plumber_page.extract_tables():
+        md = _table_to_md(table)
+        if md:
+            md_tables.append(md)
     return md_tables
 
 
+# === Improvement 3: cross-page table merging ===
+# Textbook tables often run past a page break. When enabled (T2N_TABLE_MERGE=1), a table that
+# ends near the bottom of page N and is continued by a table at the top of page N+1 whose column
+# geometry matches is stitched into one markdown table. A `<!-- table continues from page N+1 -->`
+# comment is emitted after the merged table so page-traceability survives.
+#
+# Kill-switch: default OFF (T2N_TABLE_MERGE unset / !=1). When off, the table path is the plain
+# per-page extract_tables_md() emission → byte-identical to the pre-change output (same exact-
+# fallback discipline as column-sort and the table-gate).
+#
+# Detection (a continuation = ALL of):
+#   * the upper table's bbox bottom is within TABLE_MERGE_BOTTOM_FRAC of the page height from the
+#     bottom edge (it "runs off" the page),
+#   * the lower table's bbox top is within TABLE_MERGE_TOP_FRAC of the page height from the top
+#     edge (it "resumes" at the top, below the running header),
+#   * both tables have the same normalized column count,
+#   * their column x-edges (and outer left/right edges) align within TABLE_MERGE_XTOL_FRAC of the
+#     page width,
+#   * no body heading sits between them (running headers/footers in the page margin bands are
+#     ignored — only headings in the text body block a merge).
+# A repeated header row on the lower table is dropped before appending.
+TABLE_MERGE_BOTTOM_FRAC = 0.12   # upper table must end within this frac of page height from bottom
+TABLE_MERGE_TOP_FRAC = 0.28      # lower table must start within this frac of page height from top
+TABLE_MERGE_XTOL_FRAC = 0.02     # column x-edge tolerance as a fraction of page width
+TABLE_MERGE_MARGIN_FRAC = 0.08   # top/bottom band treated as running-header/footer furniture
+
+
+def _looks_like_heading(s: str) -> bool:
+    """True if a line of text reads as a section/chapter heading (used to veto a table merge when a
+    heading sits between the two candidate tables). Conservative: chapter/part/section patterns,
+    an ALL-CAPS run, or a numbered section like '3.2 Something' — not ordinary body text."""
+    s = s.strip()
+    if not s or len(s) > MAX_HEADING_LINE_LEN:
+        return False
+    for pat in CHAPTER_PATTERNS:
+        if pat.match(s):
+            return True
+    letters = [c for c in s if c.isalpha()]
+    if len(letters) >= 4 and all(c.isupper() for c in letters):
+        return True
+    if re.match(r'^\d+(?:\.\d+){1,3}\s+[A-Z]', s):
+        return True
+    return False
+
+
+def _gather_page_tables(plumber_page, fitz_page, page_num: int) -> list[dict]:
+    """Find tables on a page with the geometry the merge pass needs: markdown, normalized column
+    count, column left-x edges, bbox, page size, and whether a body heading sits above/below the
+    table (running headers/footers in the margin bands are excluded)."""
+    found = plumber_page.find_tables()
+    if not found:
+        return []
+
+    page_w = float(fitz_page.rect.width)
+    page_h = float(fitz_page.rect.height)
+    top_margin = TABLE_MERGE_MARGIN_FRAC * page_h
+    bot_margin = page_h - TABLE_MERGE_MARGIN_FRAC * page_h
+
+    heading_ys = []  # y-centers of heading lines within the body band
+    d = fitz_page.get_text("dict")
+    for blk in d.get("blocks", []):
+        if blk.get("type") != 0:
+            continue
+        for ln in blk.get("lines", []):
+            txt = "".join(s.get("text", "") for s in ln.get("spans", []))
+            if not _looks_like_heading(txt):
+                continue
+            bb = ln["bbox"]
+            yc = (bb[1] + bb[3]) / 2.0
+            if top_margin < yc < bot_margin:
+                heading_ys.append(yc)
+
+    out = []
+    for t in found:
+        rows = t.extract()
+        md = _table_to_md(rows)
+        if not md:
+            continue
+        cells = [c for c in (getattr(t, "cells", None) or []) if c]
+        xedges = sorted({round(c[0], 1) for c in cells})
+        col_count = max((len(r) for r in rows), default=0)
+        bbox = tuple(float(v) for v in t.bbox)  # (x0, top, x1, bottom), top-origin points
+        out.append({
+            "page": page_num,
+            "rows": rows,
+            "md": md,
+            "col_count": col_count,
+            "xedges": xedges,
+            "bbox": bbox,
+            "page_w": page_w,
+            "page_h": page_h,
+            "heading_above": any(y < bbox[1] for y in heading_ys),
+            "heading_below": any(y > bbox[3] for y in heading_ys),
+        })
+    return out
+
+
+def _xedges_match(xa: list, xb: list, bbox_a: tuple, bbox_b: tuple, page_w: float) -> bool:
+    """Column x-edges align: same outer left/right edges and every edge of the shorter list has a
+    partner in the longer list, all within a page-width-relative tolerance. Allows a ±1 difference
+    in edge count (merged cells can drop an interior separator on one page)."""
+    tol = page_w * TABLE_MERGE_XTOL_FRAC
+    if abs(bbox_a[0] - bbox_b[0]) > tol or abs(bbox_a[2] - bbox_b[2]) > tol:
+        return False
+    if abs(len(xa) - len(xb)) > 1:
+        return False
+    short, long = (xa, xb) if len(xa) <= len(xb) else (xb, xa)
+    for x in short:
+        if not any(abs(x - y) <= tol for y in long):
+            return False
+    return True
+
+
+def _is_continuation(t1: dict, t2: dict) -> bool:
+    """Does table t2 (top of a later page) continue table t1 (bottom of an earlier page)?"""
+    if (t1["page_h"] - t1["bbox"][3]) > TABLE_MERGE_BOTTOM_FRAC * t1["page_h"]:
+        return False
+    if t2["bbox"][1] > TABLE_MERGE_TOP_FRAC * t2["page_h"]:
+        return False
+    if t1["col_count"] == 0 or t1["col_count"] != t2["col_count"]:
+        return False
+    if not _xedges_match(t1["xedges"], t2["xedges"], t1["bbox"], t2["bbox"], t1["page_w"]):
+        return False
+    if t1["heading_below"] or t2["heading_above"]:
+        return False
+    return True
+
+
+def _rows_header_equal(rows_a, rows_b) -> bool:
+    """True if the two tables share an identical (non-empty) header row — a repeated header to dedup."""
+    if not rows_a or not rows_b:
+        return False
+    ha = _clean_row(rows_a[0])
+    if not any(c for c in ha):
+        return False
+    return ha == _clean_row(rows_b[0])
+
+
+def merge_page_tables(page_tables: list[list[dict]]) -> dict:
+    """Stitch cross-page table continuations. `page_tables[i]` is the tables on page i (in reading
+    order). Returns {page_index: [(md, [continued_page_nums], anchor_page_num), ...]} — the table
+    blocks to emit on each page. A continued table is emitted once, on its first (anchor) page, with
+    the follow-on pages' rows appended and their page numbers recorded for the trace comment; the
+    consumed follow-on tables are not emitted again."""
+    n = len(page_tables)
+    consumed = set()  # (page_index, table_index) folded into an earlier table
+    emit: dict = {}
+    for p in range(n):
+        for idx, t in enumerate(page_tables[p]):
+            if (p, idx) in consumed:
+                continue
+            rows = list(t["rows"])
+            cont_pages = []
+            candidates = []  # (page_index, table_index) this merge would consume
+            # Only the last table on a page can run off its bottom edge into the next page.
+            if idx == len(page_tables[p]) - 1:
+                cur = t
+                q = p + 1
+                while q < n and page_tables[q] and (q, 0) not in consumed:
+                    nt = page_tables[q][0]
+                    if not _is_continuation(cur, nt):
+                        break
+                    add = list(nt["rows"])
+                    if _rows_header_equal(t["rows"], add):
+                        add = add[1:]
+                    rows.extend(add)
+                    candidates.append((q, 0))
+                    cont_pages.append(nt["page"])
+                    cur = nt
+                    q += 1
+            # Commit the merge only if the stitched table survives _table_to_md's content filter.
+            # A merge of sparse tables can drop the combined content ratio below the keep threshold;
+            # rather than silently lose the data, fall back to emitting the anchor table alone and
+            # leaving the continuation tables to emit on their own pages (byte-for-byte as today).
+            merged_md = _table_to_md(rows) if cont_pages else None
+            if cont_pages and merged_md:
+                consumed.update(candidates)
+                emit.setdefault(p, []).append((merged_md, cont_pages, t["page"]))
+            else:
+                emit.setdefault(p, []).append((t["md"], [], t["page"]))
+    return emit
+
+
 # === Core conversion ===
+def render_page_text(page, page_num: int) -> tuple[str, int]:
+    """Extracted, cleaned, column-sorted, fig-ref-annotated text for one page + its fig-ref count.
+    column_sorted_text() returns None for single-column / ambiguous pages, so those keep the exact
+    plain get_text() path (byte-identical to the pre-column-sort behavior)."""
+    ordered = column_sorted_text(page)
+    if ordered is None:
+        page_text = clean_text(page.get_text().strip())
+    else:
+        page_text = clean_text(ordered.strip())
+    return annotate_fig_refs(page_text, page_num)
+
+
 def convert_pdf(pdf_path: str, out_path: str, book_label: str) -> dict:
     """Convert a single PDF to markdown. Returns stats dict."""
     doc = fitz.open(pdf_path)
@@ -331,37 +531,62 @@ def convert_pdf(pdf_path: str, out_path: str, book_label: str) -> dict:
     total_tables = 0
     total_fig_refs = 0
     table_gate_on = os.environ.get("T2N_TABLE_GATE", "1") != "0"
+    merge_on = os.environ.get("T2N_TABLE_MERGE", "0") == "1"  # Improvement 3, default OFF
 
-    for i in range(total_pages):
-        # Improvement 1: two-column reading order. column_sorted_text() returns None for
-        # single-column / ambiguous pages, so those keep the exact pre-change get_text() path.
-        ordered = column_sorted_text(doc[i])
-        if ordered is None:
-            page_text = clean_text(doc[i].get_text().strip())
-        else:
-            page_text = clean_text(ordered.strip())
+    if not merge_on:
+        # Plain per-page path — byte-identical to the pre-merge output.
+        for i in range(total_pages):
+            # Improvement 1: two-column reading order (exact-fallback inside render_page_text).
+            page_text, fig_count = render_page_text(doc[i], i + 1)
+            total_fig_refs += fig_count
 
-        # Annotate figure/table references
-        page_text, fig_count = annotate_fig_refs(page_text, i + 1)
-        total_fig_refs += fig_count
+            output.append(f"\n<!-- page {i+1} -->\n")
+            output.append(page_text)
 
-        output.append(f"\n<!-- page {i+1} -->\n")
-        output.append(page_text)
-
-        # Improvement 2: only run the expensive pdfplumber pass on pages that plausibly hold a
-        # table. Skipped pages never touch plumber.pages[i], so they don't pay the parse cost.
-        try:
-            if table_gate_on and not page_has_table_candidate(doc[i], page_text):
+            # Improvement 2: only run the expensive pdfplumber pass on pages that plausibly hold a
+            # table. Skipped pages never touch plumber.pages[i], so they don't pay the parse cost.
+            try:
+                if table_gate_on and not page_has_table_candidate(doc[i], page_text):
+                    md_tables = []
+                else:
+                    md_tables = extract_tables_md(plumber.pages[i])
+            except Exception:
                 md_tables = []
-            else:
-                md_tables = extract_tables_md(plumber.pages[i])
-        except Exception:
-            md_tables = []
-        for j, tbl in enumerate(md_tables):
-            total_tables += 1
-            output.append(f"\n**[Table on page {i+1}]**\n")
-            output.append(tbl)
-            output.append("")
+            for j, tbl in enumerate(md_tables):
+                total_tables += 1
+                output.append(f"\n**[Table on page {i+1}]**\n")
+                output.append(tbl)
+                output.append("")
+    else:
+        # Improvement 3: cross-page merge path. Gather text + table geometry for every page first
+        # (merge decisions need the next page's tables), then emit with continuations stitched.
+        page_texts = []
+        page_tables = []
+        for i in range(total_pages):
+            page_text, fig_count = render_page_text(doc[i], i + 1)
+            total_fig_refs += fig_count
+            page_texts.append(page_text)
+            try:
+                if table_gate_on and not page_has_table_candidate(doc[i], page_text):
+                    tbls = []
+                else:
+                    tbls = _gather_page_tables(plumber.pages[i], doc[i], i + 1)
+            except Exception:
+                tbls = []
+            page_tables.append(tbls)
+
+        emit_blocks = merge_page_tables(page_tables)
+
+        for i in range(total_pages):
+            output.append(f"\n<!-- page {i+1} -->\n")
+            output.append(page_texts[i])
+            for md, cont_pages, anchor_page in emit_blocks.get(i, []):
+                total_tables += 1
+                output.append(f"\n**[Table on page {anchor_page}]**\n")
+                output.append(md)
+                for cp in cont_pages:
+                    output.append(f"<!-- table continues from page {cp} -->")
+                output.append("")
 
     doc.close()
     plumber.close()

@@ -63,7 +63,13 @@ a `full_text.md`, with:
 
 - `<!-- page N -->` markers so any passage can be traced back to a PDF page
 - Cleaned, de-hyphenated text
-- Tables extracted as markdown tables
+- Tables extracted as markdown tables. Optionally (`T2N_TABLE_MERGE=1`),
+  tables that run past a page break are stitched into one markdown table —
+  a table ending near a page bottom is joined to a geometrically-matching
+  table at the top of the next page (same column count / x-edges, no
+  intervening heading), a repeated header row is deduped, and a
+  `<!-- table continues from page N -->` comment preserves page-traceability.
+  Default OFF (exact-fallback: byte-identical output when disabled).
 - `<!-- REF: Fig. X.Y → see PDF page N -->` markers wherever the text
   references a figure or table, so downstream steps know where to look in
   the source PDF without re-scanning it

@@ -33,6 +33,7 @@ PyMuPDF 文字抽取，每頁約 130 毫秒。三個不那麼直覺的設計：
 - **靜默失敗偵測** — 原生文字層會**說謊**（CID/Identity-H 字型、PUA 碼位）。我們用亂碼率、字元密度、字型風險評分，抓出「抽得很順但其實是壞的」頁面，只把這些送去 OCR
 - **雙欄閱讀順序** — line-level 欄位分群重建雙欄的真實閱讀順序，並保留 exact-fallback，讓單欄頁面與最單純的抽取結果 byte-identical（`T2N_COLUMN_SORT=0` 可關閉）
 - **表格 pass 加閘門** — `pdfplumber` 的表格偵測是轉檔最慢的部分。我們用便宜的 `fitz` 前置檢查（框線特徵含三線表，加上多語 Table/表 關鍵字）先過濾，讓表格稀疏的書轉檔**快約 3.4 倍**又不漏表（`T2N_TABLE_GATE=0` 可關閉）
+- **跨頁表格合併** — 課本表格常常跨頁。設 `T2N_TABLE_MERGE=1` 可把「結束在頁面底部」的表格與「下一頁頂端、欄位幾何相符」的表格縫成一張（欄數／欄 x 邊界一致、中間無標題），並去除重複的表頭列，留下 `<!-- table continues from page N -->` 追溯註解。同樣採 exact-fallback：預設關閉時輸出 byte-identical
 
 掃描頁會落入 **OCR 階梯** — Surya → PaddleOCR-VL → 本地視覺模型 → 大模型視覺（真正的最後手段）— 逐頁選擇，不把整本書押在單一方法。詳見 [`docs/ocr-ladder.md`](docs/ocr-ladder.md)，內含**硬體分級的模型選擇表**（無 GPU／Apple Silicon／NVIDIA 8GB／16GB+），讓你按自己的 VRAM 選引擎與 ollama 模型，而不是轉到一半 OOM。
 
