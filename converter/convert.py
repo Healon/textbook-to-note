@@ -723,21 +723,48 @@ def merge_page_tables(page_tables: list[list[dict]]) -> dict:
 #
 # Kill-switch: T2N_BOOK_TABLE_CHECK=0. Defaults ON — detection only, no extraction change.
 BOOK_ZERO_TABLE_MIN_CAPTIONS = 10
-# Data-driven table-reliability banner: when this fraction of a book's tables (given at least
-# BOOK_HIGH_FLAG_MIN_TABLES of them) carry a structural QC flag, the whole book's tables are
-# systematically mis-structured, so a book-level flag is hung for the downstream LLM. QC flags
-# see structure, not value-on-wrong-row misbinding — a high flag rate is the proxy for "don't
-# trust these tables; go read the PDF". (A dense rehab-pharmacology reference ran ~66%.)
-BOOK_HIGH_FLAG_RATE = 0.40
+# Partial-loss detection. The zero-table rule above only fires when a book extracts NOTHING, which
+# is how a corpus-wide table loss can stay invisible: a book that recovers a handful of tables
+# looks healthy. One reference in the measured corpus ships 274 table captions and, even with the
+# Docling rung on, recovers 45 tables (ratio 0.16) — the same failure as the books the zero-rule
+# catches, at nearly the same size, but silent.
+#
+# Threshold from the corpus, not from taste. Measured over 171 converted books carrying >=10
+# captions: median ratio 0.99, p75 1.99 (the caption regex deliberately over-counts — it matches
+# "as listed in Table 5.2" cross-references too — so a healthy book sits at or above 1). The low
+# tail is dense and unambiguous: 21 books at ratio <0.01 and 42 at <0.20, including two large
+# references at 0.03 and 0.07 that the zero-rule does not flag. 0.20 sits at p25 of that
+# distribution and a factor of 5 below the median.
+#
+# This is a WARNING, not a rejection: a low ratio can also mean a book whose captions are mostly
+# cross-references, so the wording says "likely". The cost of a false alarm is one warning line;
+# the cost of the miss is the silent failure this check exists to end.
+BOOK_PARTIAL_TABLE_RATIO = 0.20
+
+# Book-level table-reliability banner. The numerator is deliberately NOT "any QC flag": measured
+# across a 6-book pilot, any-flag rates cluster at 39-64% for every dense clinical book (64, 59,
+# 53, 51, 39), so an any-flag threshold cannot separate a book whose tables are systematically
+# wrong from one whose tables are mostly right — it would hang a banner on two thirds of a corpus
+# and mean nothing.
+#
+# CONTENT-RETENTION does separate them, because it is the one check that measures actual data loss
+# (text present in the page's own text layer that reached no cell) rather than formatting: the same
+# six books run 40%, 27%, 17%, 12%, 2%, 0%. The ragged_row / empty_first_cell checks fire on benign
+# layouts (spanning headers, indented sub-rows) and are left to the per-table markers, which name
+# the exact table and rows.
+#
+# 0.25 sits in the gap between the two clusters. Small sample (n=6) — revisit against a full-corpus
+# distribution.
+BOOK_CONTENT_LOSS_RATE = 0.25
 BOOK_HIGH_FLAG_MIN_TABLES = 10
 
 
-def _book_reliability_flagged(total_flagged: int, total_tables: int) -> bool:
-    """True when a high enough fraction of a book's tables carry a QC flag to warrant a whole-book
+def _book_reliability_flagged(content_loss_tables: int, total_tables: int) -> bool:
+    """True when a high enough fraction of a book's tables lost content to warrant a whole-book
     'verify against the PDF' banner. Pure predicate (the >= min-tables guard is checked first, so
     a 0-table book never divides by zero)."""
     return (total_tables >= BOOK_HIGH_FLAG_MIN_TABLES
-            and total_flagged / total_tables >= BOOK_HIGH_FLAG_RATE)
+            and content_loss_tables / total_tables >= BOOK_CONTENT_LOSS_RATE)
 TABLE_CAPTION_RE = re.compile(r'^\s*(?:TABLE|Table)\s+\d+[.\-]\d+', re.M)
 
 
@@ -813,6 +840,7 @@ def convert_pdf(pdf_path: str, out_path: str, book_label: str, table_worker=None
 
     total_docling_tables = 0
     total_flagged = 0
+    total_content_loss = 0   # tables whose QC flags include actual data loss (content-retention)
     total_repairs = 0
 
     if not merge_on:
@@ -877,6 +905,8 @@ def convert_pdf(pdf_path: str, out_path: str, book_label: str, table_worker=None
                     # be able to see that this table needs checking against the PDF before it is
                     # cited as clean data.
                     total_flagged += 1
+                    if any(f.startswith('content-retention') for f in flags):
+                        total_content_loss += 1
                     output.append(format_trace_marker(i + 1, flags))
                 if review_on:
                     # Orthogonal to the QC flag above: this catches MISBINDING (a value on the
@@ -962,6 +992,14 @@ def convert_pdf(pdf_path: str, out_path: str, book_label: str, table_worker=None
             warnings_out.append(
                 f"0 tables extracted despite {total_captions} table captions in the text — this "
                 f"book's tables are very likely all missing (borderless or sub-3pt ruling lines)")
+        elif (total_captions >= BOOK_ZERO_TABLE_MIN_CAPTIONS
+              and total_tables / total_captions < BOOK_PARTIAL_TABLE_RATIO):
+            # Partial loss is the silent version of the same failure: enough tables come through
+            # that the zero-table rule stays quiet, while most of the book's tables are missing.
+            warnings_out.append(
+                f"only {total_tables} tables extracted against {total_captions} table captions "
+                f"(ratio {total_tables / total_captions:.2f}, below {BOOK_PARTIAL_TABLE_RATIO:.2f}) "
+                f"— most of this book's tables are likely still missing from this markdown")
         if page_errors:
             kinds = ", ".join(sorted({k for _, k, _ in page_errors}))
             warnings_out.append(
@@ -978,11 +1016,14 @@ def convert_pdf(pdf_path: str, out_path: str, book_label: str, table_worker=None
     # cannot see a value bound to the wrong row, so this banner tells the note-writing LLM to treat
     # EVERY table here as needing a check against the source PDF.
     flag_rate = (total_flagged / total_tables) if total_tables else 0.0
-    reliability_flagged = _book_reliability_flagged(total_flagged, total_tables)
+    loss_rate = (total_content_loss / total_tables) if total_tables else 0.0
+    reliability_flagged = _book_reliability_flagged(total_content_loss, total_tables)
     if reliability_flagged:
         banner = [
             "\n> [!caution] Table reliability — verify EVERY table in this book against the PDF",
-            f"> {total_flagged}/{total_tables} tables ({flag_rate:.0%}) carry a structural QC flag. "
+            f"> {total_content_loss}/{total_tables} tables ({loss_rate:.0%}) lost content that is "
+            f"present in the page's text layer but reached no cell; {total_flagged} "
+            f"({flag_rate:.0%}) carry some structural QC flag. "
             f"This book's tables are systematically mis-structured (category headers cast as data "
             f"rows, brand/rating misbindings, truncated multi-line cells). The structural QC gate "
             f"CANNOT detect a value bound to the wrong row, so do not cite any table in this book "
@@ -1011,6 +1052,7 @@ def convert_pdf(pdf_path: str, out_path: str, book_label: str, table_worker=None
         # how much of the output each engine actually produced.
         "docling_tables": total_docling_tables,
         "flagged_tables": total_flagged,
+        "content_loss_tables": total_content_loss,
         "ligature_repairs": total_repairs,
         # Out-of-band review queue (T2N_REVIEW_QUEUE). `review_flagged` counts tables routed to
         # the second-opinion pass; `review_queue` lists (page, reasons) so a batch caller can write
@@ -1022,6 +1064,7 @@ def convert_pdf(pdf_path: str, out_path: str, book_label: str, table_worker=None
         # is the fraction regardless of whether the banner fired, for corpus-level auditing.
         "reliability_flagged": reliability_flagged,
         "flag_rate": round(flag_rate, 3),
+        "content_loss_rate": round(loss_rate, 3),
     }
 
 

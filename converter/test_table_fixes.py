@@ -538,14 +538,40 @@ check("header-collapse: T2N_TABLE_HEADER_COLLAPSE=0 restores byte-identical outp
       _md_off.count("Cat: a long spanned category label") == 4)
 
 # ── Fix: data-driven book-level reliability banner predicate ──
-check("reliability: 70% flag rate over >=10 tables flags the book",
-      cv._book_reliability_flagged(7, 10) is True)
-check("reliability: exactly 40% over >=10 tables flags the book (boundary)",
+# The numerator is tables that LOST CONTENT (a content-retention flag), not tables carrying any
+# QC flag: any-flag rates measured 39-64% on every dense clinical book in the pilot, so they do
+# not separate a systematically-wrong book from a mostly-right one. Content-loss rates on the same
+# books were 40 / 27 / 17 / 12 / 2 / 0 %, and the threshold sits in that gap.
+check("reliability: 40% content-loss rate over >=10 tables flags the book",
       cv._book_reliability_flagged(4, 10) is True)
-check("reliability: 30% flag rate does not flag the book",
-      cv._book_reliability_flagged(3, 10) is False)
+check("reliability: exactly 25% over >=10 tables flags the book (boundary)",
+      cv._book_reliability_flagged(25, 100) is True)
+check("reliability: 24% content-loss rate does not flag the book (boundary-1)",
+      cv._book_reliability_flagged(24, 100) is False)
+check("reliability: 12% content-loss rate does not flag the book",
+      cv._book_reliability_flagged(12, 100) is False)
 check("reliability: a high rate under the min-table floor does not flag (and no div-by-zero)",
       cv._book_reliability_flagged(9, 9) is False and cv._book_reliability_flagged(0, 0) is False)
+
+# ── Fix: partial table-loss detection (the zero-table rule's silent sibling) ──
+# Threshold measured over 171 converted books with >=10 captions: median ratio 0.99, p75 1.99,
+# and a dense low tail (21 books <0.01, 42 <0.20). A book recovering SOME tables used to produce
+# no warning at all no matter how many it lost.
+def _partial(tables, caps):
+    """Reproduce convert_pdf()'s partial-loss branch condition."""
+    return (caps >= cv.BOOK_ZERO_TABLE_MIN_CAPTIONS and tables > 0
+            and tables / caps < cv.BOOK_PARTIAL_TABLE_RATIO)
+
+check("partial-loss: 45 tables against 274 captions (ratio 0.16) warns",
+      _partial(45, 274) is True)
+check("partial-loss: 9 tables against 266 captions warns (large reference, zero-rule silent)",
+      _partial(9, 266) is True)
+check("partial-loss: exactly at the threshold does not warn (ratio 0.20)",
+      _partial(20, 100) is False)
+check("partial-loss: a healthy book (ratio ~1) does not warn",
+      _partial(77, 67) is False and _partial(100, 100) is False)
+check("partial-loss: a book with few captions is never judged on the ratio",
+      _partial(0, 9) is False and _partial(1, 9) is False)
 
 # ── report ──────────────────────────────────────────────────────────────────
 fails = [r for r in results if r[1] == "FAIL"]

@@ -158,11 +158,20 @@ remain (value↔label fusion, brand-on-wrong-drug, truncated multi-line cells) �
 
 When a large fraction of a book's tables trip a structural QC flag, the per-table `⚠️` markers
 under-communicate that the **whole book**'s tables are hostile to extraction. Because the QC gate
-sees structure but not value-on-wrong-row misbinding, a high flag rate is a proxy for "verify every
-table here against the PDF." If ≥`BOOK_HIGH_FLAG_RATE` (40%) of a book's tables — given at least
-`BOOK_HIGH_FLAG_MIN_TABLES` (10) of them — are QC-flagged, a `> [!caution]` banner is hung at the top
+sees structure but not value-on-wrong-row misbinding, a high loss rate is a proxy for "verify every
+table here against the PDF."
+
+The numerator is deliberately **content loss**, not any QC flag. Measured across a 6-book pilot, any-flag
+rates cluster at 39-64% for every dense clinical book (64/59/53/51/39) — a threshold on that number would
+banner two thirds of a corpus and mean nothing. Content-retention, the one check that measures actual data
+loss rather than formatting, runs 40/27/17/12/2/0% on the same books, and 25% sits in the gap. The
+ragged-row / empty-first-cell checks fire on benign layouts and are left to the per-table markers, which
+name the exact table and rows. (n=6: revisit against a full-corpus distribution.)
+
+If ≥`BOOK_CONTENT_LOSS_RATE` (25%) of a book's tables — given at least
+`BOOK_HIGH_FLAG_MIN_TABLES` (10) of them — lost content, a `> [!caution]` banner is hung at the top
 of the markdown so the downstream note-writing model treats the whole book as needing PDF checks, and
-`reliability_flagged` / `flag_rate` are returned in the per-book stats for corpus auditing. A dense
-rehab-pharmacology reference ran 66%. This is the "hang the flag at the book, so the LLM actually sees
+`reliability_flagged` / `content_loss_rate` / `flag_rate` are returned in the per-book stats for corpus
+auditing. A dense rehab-pharmacology reference ran 40% content loss (64% any-flag). This is the "hang the flag at the book, so the LLM actually sees
 it" complement to the per-table review queue: the queue catches the continuation/dose hot-spots, the
 banner catches whole books whose grids fail structurally throughout.
