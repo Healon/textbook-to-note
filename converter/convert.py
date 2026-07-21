@@ -35,6 +35,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from shared.config import BOOKS_DIR, OUTPUT_DIR, SURYA_VENV_PY, SURYA_ADAPTER, SKIP_FOLDERS
 
+# Out-of-band table-review trigger (T2N_REVIEW_QUEUE=1). Pure-stdlib (os/re), always importable.
+from review_queue import review_queue_enabled, review_reasons, format_review_marker
+
 # Optional Docling table rung (T2N_DOCLING=1). Imported defensively: docling_tables only needs
 # fitz on this side (the heavy Docling stack lives in its own venv and is reached by subprocess),
 # but a missing/broken module must degrade to the pdfplumber-only path rather than break every
@@ -726,10 +729,13 @@ def convert_pdf(pdf_path: str, out_path: str, book_label: str, table_worker=None
     total_fig_refs = 0
     total_rejected = 0
     total_captions = 0
+    total_review_flagged = 0            # tables routed to the out-of-band review queue
+    review_queue_entries = []           # [(page_no, [reasons])] — a batch caller can write a manifest
     page_errors = []  # (page_num, exc_type, message) — counted, never swallowed
     detect_on = os.environ.get("T2N_BOOK_TABLE_CHECK", "1") != "0"
     table_gate_on = os.environ.get("T2N_TABLE_GATE", "1") != "0"
     merge_on = os.environ.get("T2N_TABLE_MERGE", "0") == "1"  # Improvement 3, default OFF
+    review_on = review_queue_enabled()  # out-of-band review markers, default OFF
 
     # Docling table rung (default OFF: a new capability, not a fix to currently-wrong output, so
     # it follows T2N_TABLE_MERGE's convention rather than T2N_TABLE_FRAME_REJECT's). When on, the
@@ -825,6 +831,14 @@ def convert_pdf(pdf_path: str, out_path: str, book_label: str, table_worker=None
                     # cited as clean data.
                     total_flagged += 1
                     output.append(format_trace_marker(i + 1, flags))
+                if review_on:
+                    # Orthogonal to the QC flag above: this catches MISBINDING (a value on the
+                    # wrong row), which is structurally invisible so `flags` may be empty here.
+                    rr = review_reasons(tbl, page_text)
+                    if rr:
+                        total_review_flagged += 1
+                        review_queue_entries.append((i + 1, rr))
+                        output.append(format_review_marker(i + 1, rr))
                 output.append(tbl)
                 output.append("")
     else:
@@ -859,6 +873,14 @@ def convert_pdf(pdf_path: str, out_path: str, book_label: str, table_worker=None
             for md, cont_pages, anchor_page in emit_blocks.get(i, []):
                 total_tables += 1
                 output.append(f"\n**[Table on page {anchor_page}]**\n")
+                if review_on:
+                    # A stitched table (cont_pages non-empty) IS a continuation by construction —
+                    # pass that in so the trigger does not depend on a textual "(continued)" marker.
+                    rr = review_reasons(md, page_texts[i], stitched_continuation=bool(cont_pages))
+                    if rr:
+                        total_review_flagged += 1
+                        review_queue_entries.append((anchor_page, rr))
+                        output.append(format_review_marker(anchor_page, rr))
                 output.append(md)
                 for cp in cont_pages:
                     output.append(f"<!-- table continues from page {cp} -->")
@@ -927,6 +949,11 @@ def convert_pdf(pdf_path: str, out_path: str, book_label: str, table_worker=None
         "docling_tables": total_docling_tables,
         "flagged_tables": total_flagged,
         "ligature_repairs": total_repairs,
+        # Out-of-band review queue (T2N_REVIEW_QUEUE). `review_flagged` counts tables routed to
+        # the second-opinion pass; `review_queue` lists (page, reasons) so a batch caller can write
+        # a per-book review manifest. Both are 0/empty when the queue is off.
+        "review_flagged": total_review_flagged,
+        "review_queue": review_queue_entries,
     }
 
 
@@ -971,7 +998,8 @@ def batch_convert(books: dict, book_keys: list[str]) -> dict:
                 stats["file"] = pdf.name
                 stats["book"] = book["label"]
                 results.append(stats)
-                print(f"  ✓ {pdf.name} ({stats['pages']}p, {stats['tables']}t, {stats['fig_refs']}f, {stats['size_kb']}KB)")
+                rev = f", {stats['review_flagged']}⚠rev" if stats.get("review_flagged") else ""
+                print(f"  ✓ {pdf.name} ({stats['pages']}p, {stats['tables']}t, {stats['fig_refs']}f, {stats['size_kb']}KB{rev})")
                 for w in stats.get("warnings", []):
                     print(f"    [WARN] {pdf.name}: {w}")
                     errors.append(f"[TABLE-WARN] {pdf.name}: {w}")

@@ -94,6 +94,15 @@ Check the output markdown for:
 - Any `<!-- REF: Fig. X.Y → ... -->` markers where the source mentions
   figures
 
+**For clinical / drug-dosing corpora, set `T2N_REVIEW_QUEUE=1`.** Extracted
+tables can carry a *misbinding* — a value on the wrong row (a dose fused into
+the wrong drug on a continuation page) — that is structurally invisible to the
+QC gate and reads as clean, citable data. The flag marks the high-risk subset
+(continuation-page + dosage/threshold tables) with a
+`<!-- ⚠️ table needs out-of-band review … -->` comment for a second-opinion
+pass. Before citing any flagged table as data, verify it against the PDF (or
+run the review pass). See [`docs/table-review.md`](docs/table-review.md).
+
 If the text looks garbled or mostly empty, read `docs/ocr-ladder.md` and
 re-run with the OCR-forcing flag (`--force-surya`, requires the optional
 OCR engine from `docs/ocr-ladder.md`) rather than assuming the conversion is
