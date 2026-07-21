@@ -8,6 +8,14 @@ failure mode found by measuring real books, with a deliberate fix and a kill-swi
 The format is based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 loose semantic versioning.
 
+## [Unreleased]
+
+### Changed
+- **Related-projects section now links [note-supplement](https://github.com/drpwchen/note-supplement)**
+  (both README variants). It covers the direction this pipeline deliberately does not: merging new
+  source material into notes that already exist, where the risk is not missing content but silently
+  overwriting content the existing note already got right.
+
 ## [0.2.0] — 2026-07-21 — Table fidelity
 
 A sustained pass over how the pipeline handles textbook tables, driven by measuring the real

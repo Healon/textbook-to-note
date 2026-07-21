@@ -115,6 +115,7 @@ This tool ships **no textbook content**. It operates on PDFs you already own —
 
 - [**vault-search**](https://github.com/drpwchen/vault-search) — the local semantic-search engine stage 3 builds on.
 - [**openevidence-tools**](https://github.com/drpwchen/openevidence-tools) — the OpenEvidence ask + verify pair that plugs into the Bonus stage.
+- [**note-supplement**](https://github.com/drpwchen/note-supplement) — the other direction: merges new source material into notes you *already* wrote, with conflict detection and tier-gated writes.
 
 ## License
 

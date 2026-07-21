@@ -115,6 +115,7 @@ shared/       環境變數驅動的設定（config.py）
 
 - [**vault-search**](https://github.com/drpwchen/vault-search) — 第三關所基於的本地語意搜尋引擎
 - [**openevidence-tools**](https://github.com/drpwchen/openevidence-tools) — 接在 Bonus 關的 OpenEvidence 提問 + verify 工具組
+- [**note-supplement**](https://github.com/drpwchen/note-supplement) — 反方向的工具：把新素材補進**已經寫好**的筆記，內建衝突偵測與分級寫入
 
 ## 授權
 
