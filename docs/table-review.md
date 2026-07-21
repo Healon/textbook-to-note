@@ -133,3 +133,36 @@ Flag, never auto-"fix". There is no safe automatic correction for a misbinding �
 right value-to-row assignment is exactly the thing in doubt, so a code fix would either
 miss most cases or corrupt good tables. The queue's job is to make the risk **visible**
 (to a human or a review model) before the markdown is cited, not to guess.
+
+## Two related failures with a *deterministic* signature (these we DO fix / flag in code)
+
+The "never auto-fix" rule is specifically about **misbinding** — where the correct value-to-row
+mapping is unknowable from the geometry. Two adjacent failures in the same dense-drug-grid books
+*do* have an unambiguous signature, so they are handled in code rather than left to the review pass.
+
+### Spanned category-header collapse (`T2N_TABLE_HEADER_COLLAPSE`, default ON)
+
+A category/section header ("Corticosteroids: Used to reduce inflammation.", "Calcium channel
+blockers: Used to treat angina.") gets broadcast across **every** column of a wide grid, producing
+a phantom full-width data row that also shifts the alignment of the real drug rows. A genuine data
+row never repeats one sentence-length string across all its columns, so the fix is safe: any row
+whose ≥3 non-empty cells are the byte-identical ≥15-char string is re-cast as a single header cell
+(text in column 0, the rest blanked). This moves **no value between rows**, so — unlike a misbinding
+"fix" — it cannot corrupt a binding. One dense pharmacology reference carried the pattern on 130 of
+232 tables (56%). Set `T2N_TABLE_HEADER_COLLAPSE=0` to restore byte-identical output.
+
+This fix reduces the structural noise so a human/model review can see the *real* misbindings that
+remain (value↔label fusion, brand-on-wrong-drug, truncated multi-line cells) — it does not touch them.
+
+### Book-level table-reliability banner (data-driven, detection only)
+
+When a large fraction of a book's tables trip a structural QC flag, the per-table `⚠️` markers
+under-communicate that the **whole book**'s tables are hostile to extraction. Because the QC gate
+sees structure but not value-on-wrong-row misbinding, a high flag rate is a proxy for "verify every
+table here against the PDF." If ≥`BOOK_HIGH_FLAG_RATE` (40%) of a book's tables — given at least
+`BOOK_HIGH_FLAG_MIN_TABLES` (10) of them — are QC-flagged, a `> [!caution]` banner is hung at the top
+of the markdown so the downstream note-writing model treats the whole book as needing PDF checks, and
+`reliability_flagged` / `flag_rate` are returned in the per-book stats for corpus auditing. A dense
+rehab-pharmacology reference ran 66%. This is the "hang the flag at the book, so the LLM actually sees
+it" complement to the per-table review queue: the queue catches the continuation/dose hot-spots, the
+banner catches whole books whose grids fail structurally throughout.

@@ -504,6 +504,49 @@ check("predicate: furniture kill-switch disables the band rule",
                lambda: cv.page_furniture_reject_reason([["a", "b"], ["c", "d"]],
                                                        (23, 23, 572, BAND - 20), PAGE_H)) is None)
 
+# ── Fix: collapse category headers spanned across every column (T2N_TABLE_HEADER_COLLAPSE) ──
+# 9-col row whose non-empty cells are all the same >=15-char sentence → collapses to header cell.
+_spanned = [["Corticosteroids: Used to reduce inflammation."] * 9]
+_n = cv._collapse_spanned_header(_spanned)
+check("header-collapse: a 9-col spanned category header collapses to one cell",
+      _n == 1 and _spanned[0][0] == "Corticosteroids: Used to reduce inflammation."
+      and _spanned[0][1:] == [""] * 8)
+# a genuine data row (distinct values) is left untouched.
+_real = [["Dexamethasone", "++", "0", "++", "++", "++", "+", "++", "GI upset"]]
+check("header-collapse: a real data row with distinct values is unchanged",
+      cv._collapse_spanned_header(_real) == 0
+      and _real[0] == ["Dexamethasone", "++", "0", "++", "++", "++", "+", "++", "GI upset"])
+# short identical tokens (e.g. a Yes/Yes/Yes rating row) are below the length guard → unchanged.
+_short = [["Yes", "Yes", "Yes"]]
+check("header-collapse: short identical cells (below min_len) are not collapsed",
+      cv._collapse_spanned_header(_short) == 0 and _short[0] == ["Yes", "Yes", "Yes"])
+# only 2 identical cells (below min_cols) → unchanged.
+_two = [["A long repeated label here", "A long repeated label here"]]
+check("header-collapse: only two identical cells (below min_cols) are not collapsed",
+      cv._collapse_spanned_header(_two) == 0)
+# end-to-end through _table_to_md: header row collapsed, real row intact.
+_tbl = [["Cat: a long spanned category label"] * 4,
+        ["Diltiazem", "+", "0", "angina"]]
+_md_on = with_env({"T2N_TABLE_HEADER_COLLAPSE": "1"}, lambda: cv._table_to_md([list(r) for r in _tbl]))
+check("header-collapse: _table_to_md drops the spanned header's phantom columns",
+      "Cat: a long spanned category label |" in _md_on
+      and _md_on.count("Cat: a long spanned category label") == 1
+      and "Diltiazem | + | 0 | angina" in _md_on)
+# kill-switch restores byte-identical pre-change output (phantom columns retained).
+_md_off = with_env({"T2N_TABLE_HEADER_COLLAPSE": "0"}, lambda: cv._table_to_md([list(r) for r in _tbl]))
+check("header-collapse: T2N_TABLE_HEADER_COLLAPSE=0 restores byte-identical output",
+      _md_off.count("Cat: a long spanned category label") == 4)
+
+# ── Fix: data-driven book-level reliability banner predicate ──
+check("reliability: 70% flag rate over >=10 tables flags the book",
+      cv._book_reliability_flagged(7, 10) is True)
+check("reliability: exactly 40% over >=10 tables flags the book (boundary)",
+      cv._book_reliability_flagged(4, 10) is True)
+check("reliability: 30% flag rate does not flag the book",
+      cv._book_reliability_flagged(3, 10) is False)
+check("reliability: a high rate under the min-table floor does not flag (and no div-by-zero)",
+      cv._book_reliability_flagged(9, 9) is False and cv._book_reliability_flagged(0, 0) is False)
+
 # ── report ──────────────────────────────────────────────────────────────────
 fails = [r for r in results if r[1] == "FAIL"]
 for name, status, detail in results:

@@ -295,6 +295,32 @@ def _clean_row(row) -> list[str]:
     ]
 
 
+# A category/section header that the extractor broadcast across every column of a wide grid
+# reads as a data row whose non-empty cells are all the byte-identical, sentence-length string
+# (e.g. "Corticosteroids: Used to reduce inflammation." repeated across 9 columns). A real data
+# row never repeats one long string across every column, so this signature is unambiguous. Dense
+# drug×attribute references (e.g. rehab pharmacology books) hit it on ~half their tables.
+TABLE_HEADER_COLLAPSE_MIN_COLS = 3    # need at least this many identical non-empty cells
+TABLE_HEADER_COLLAPSE_MIN_LEN = 15    # ...each at least this long (a label, not a "++" rating)
+
+
+def _collapse_spanned_header(cleaned: list[list[str]]) -> int:
+    """In-place: re-cast any row whose >=3 non-empty cells are the identical >=15-char string as
+    a single header cell (text in column 0, the rest blanked). Returns the number of rows changed.
+    Structural only — it never moves a value between rows, so it cannot create a misbinding."""
+    n = 0
+    for row in cleaned:
+        nonempty = [c for c in row if c.strip()]
+        if (len(nonempty) >= TABLE_HEADER_COLLAPSE_MIN_COLS
+                and len(set(nonempty)) == 1
+                and len(nonempty[0]) >= TABLE_HEADER_COLLAPSE_MIN_LEN):
+            text = nonempty[0]
+            for i in range(len(row)):
+                row[i] = text if i == 0 else ""
+            n += 1
+    return n
+
+
 def _table_to_md(table) -> str | None:
     """Render one raw table (list of rows of cell values) to a markdown table string, or
     None when the table is too small / too empty to keep. This is the single source of
@@ -305,6 +331,12 @@ def _table_to_md(table) -> str | None:
         return None
 
     cleaned = [_clean_row(row) for row in table]
+
+    # Fix: collapse category/section headers the extractor spanned across every column into a
+    # single header cell. Default ON (corrects wrong output, like the frame/furniture rejects);
+    # set T2N_TABLE_HEADER_COLLAPSE=0 to restore the byte-identical pre-change output.
+    if os.environ.get("T2N_TABLE_HEADER_COLLAPSE", "1") != "0":
+        _collapse_spanned_header(cleaned)
 
     # Filter: keep tables with >5% content cells (low bar — prefer to keep)
     content_cells = sum(1 for row in cleaned for cell in row if cell.strip())
@@ -691,6 +723,21 @@ def merge_page_tables(page_tables: list[list[dict]]) -> dict:
 #
 # Kill-switch: T2N_BOOK_TABLE_CHECK=0. Defaults ON — detection only, no extraction change.
 BOOK_ZERO_TABLE_MIN_CAPTIONS = 10
+# Data-driven table-reliability banner: when this fraction of a book's tables (given at least
+# BOOK_HIGH_FLAG_MIN_TABLES of them) carry a structural QC flag, the whole book's tables are
+# systematically mis-structured, so a book-level flag is hung for the downstream LLM. QC flags
+# see structure, not value-on-wrong-row misbinding — a high flag rate is the proxy for "don't
+# trust these tables; go read the PDF". (A dense rehab-pharmacology reference ran ~66%.)
+BOOK_HIGH_FLAG_RATE = 0.40
+BOOK_HIGH_FLAG_MIN_TABLES = 10
+
+
+def _book_reliability_flagged(total_flagged: int, total_tables: int) -> bool:
+    """True when a high enough fraction of a book's tables carry a QC flag to warrant a whole-book
+    'verify against the PDF' banner. Pure predicate (the >= min-tables guard is checked first, so
+    a 0-table book never divides by zero)."""
+    return (total_tables >= BOOK_HIGH_FLAG_MIN_TABLES
+            and total_flagged / total_tables >= BOOK_HIGH_FLAG_RATE)
 TABLE_CAPTION_RE = re.compile(r'^\s*(?:TABLE|Table)\s+\d+[.\-]\d+', re.M)
 
 
@@ -926,6 +973,22 @@ def convert_pdf(pdf_path: str, out_path: str, book_label: str, table_worker=None
         block += [f"> - {w}" for w in warnings_out]
         output[warn_slot:warn_slot] = ["\n".join(block) + "\n"]
 
+    # Data-driven table-reliability banner (hang the flag at book level, not per-table): a high
+    # QC-flag rate means this book's tables are systematically mis-structured. The structural gate
+    # cannot see a value bound to the wrong row, so this banner tells the note-writing LLM to treat
+    # EVERY table here as needing a check against the source PDF.
+    flag_rate = (total_flagged / total_tables) if total_tables else 0.0
+    reliability_flagged = _book_reliability_flagged(total_flagged, total_tables)
+    if reliability_flagged:
+        banner = [
+            "\n> [!caution] Table reliability — verify EVERY table in this book against the PDF",
+            f"> {total_flagged}/{total_tables} tables ({flag_rate:.0%}) carry a structural QC flag. "
+            f"This book's tables are systematically mis-structured (category headers cast as data "
+            f"rows, brand/rating misbindings, truncated multi-line cells). The structural QC gate "
+            f"CANNOT detect a value bound to the wrong row, so do not cite any table in this book "
+            f"as clean data without checking it against the source PDF."]
+        output[warn_slot:warn_slot] = ["\n".join(banner) + "\n"]
+
     # Write output
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
@@ -954,6 +1017,11 @@ def convert_pdf(pdf_path: str, out_path: str, book_label: str, table_worker=None
         # a per-book review manifest. Both are 0/empty when the queue is off.
         "review_flagged": total_review_flagged,
         "review_queue": review_queue_entries,
+        # Data-driven book-level reliability flag: True when >=BOOK_HIGH_FLAG_RATE of the book's
+        # tables carry a QC flag (a whole-book "verify against PDF" banner was emitted). `flag_rate`
+        # is the fraction regardless of whether the banner fired, for corpus-level auditing.
+        "reliability_flagged": reliability_flagged,
+        "flag_rate": round(flag_rate, 3),
     }
 
 
