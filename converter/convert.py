@@ -32,7 +32,22 @@ import subprocess
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from shared.config import BOOKS_DIR, OUTPUT_DIR, SURYA_VENV_PY, SURYA_ADAPTER, SKIP_FOLDERS
+
+# Optional Docling table rung (T2N_DOCLING=1). Imported defensively: docling_tables only needs
+# fitz on this side (the heavy Docling stack lives in its own venv and is reached by subprocess),
+# but a missing/broken module must degrade to the pdfplumber-only path rather than break every
+# conversion. _DOCLING_IMPORT_ERROR is surfaced once per book in the conversion report.
+try:
+    from docling_tables import (DoclingTableWorker, qc_flags, format_trace_marker,
+                                repair_ligatures, format_repair_marker)
+    _DOCLING_IMPORT_ERROR = None
+except Exception as _e:  # pragma: no cover - exercised only on a broken install
+    DoclingTableWorker = None
+    qc_flags = format_trace_marker = None
+    repair_ligatures = format_repair_marker = None
+    _DOCLING_IMPORT_ERROR = f"{type(_e).__name__}: {_e}"
 
 # === Config ===
 OUTPUT_BASE = OUTPUT_DIR
@@ -336,30 +351,106 @@ def _table_to_md(table) -> str | None:
 #
 # Kill-switch: set T2N_TABLE_FRAME_REJECT=0 to restore the old (defective) behavior. Defaults ON,
 # unlike T2N_TABLE_MERGE — this is a bug fix to wrong output, not a new capability.
-TABLE_FRAME_MAX_COLS = 1       # normalized column count at/below which a table encodes no structure
+TABLE_FRAME_MAX_COLS = 1       # column count at/below which a table encodes no structure
 TABLE_FRAME_CELL_CHARS = 500   # a single cell this long is a page-body dump, not a table cell
 TABLE_FRAME_AREA_FRAC = 0.50   # ...or the bbox alone already covers this much of the page
 
 
+def _content_col_count(rows) -> int:
+    """How many columns actually CONTAIN content, as opposed to how many pdfplumber ruled.
+    Contributed by @Alan9981 (PR #1): a candidate whose text all sits in one column encodes no
+    column bindings no matter how many empty columns were ruled beside it, so the normalized
+    count lets that case walk straight past a `cols <= 1` bail-out."""
+    return len({ci for r in rows for ci, c in enumerate(r) if c and str(c).strip()})
+
+
 def page_frame_reject_reason(rows, bbox, page_w: float, page_h: float) -> str | None:
     """Reason string if this candidate table is a page-frame pseudo-table that should be discarded,
-    else None. Only ever fires on tables of TABLE_FRAME_MAX_COLS columns or fewer, so a table whose
-    columns pdfplumber actually resolved is never at risk."""
+    else None. Only ever fires on tables that resolve to TABLE_FRAME_MAX_COLS columns or fewer
+    EITHER by normalized count or by content-bearing count, so a table whose columns pdfplumber
+    actually resolved and filled is never at risk."""
     if os.environ.get("T2N_TABLE_FRAME_REJECT", "1") == "0":
         return None
     if not rows:
         return None
-    if max((len(r) for r in rows), default=0) > TABLE_FRAME_MAX_COLS:
+    n_cols = max((len(r) for r in rows), default=0)
+    if os.environ.get("T2N_TABLE_FRAME_CONTENT_COLS", "1") == "0":
+        n_content = n_cols                      # narrow kill-switch: pre-PR#1 behavior
+    else:
+        n_content = _content_col_count(rows)
+    if n_cols > TABLE_FRAME_MAX_COLS and n_content > TABLE_FRAME_MAX_COLS:
         return None
+    shape = ("single column" if n_cols <= TABLE_FRAME_MAX_COLS
+             else f"content in {n_content} of {n_cols} columns")
     max_chars = max((len(str(c)) for r in rows for c in r if c), default=0)
     if max_chars > TABLE_FRAME_CELL_CHARS:
-        return f"single column, {max_chars}-char cell"
+        return f"page frame: {shape}, {max_chars}-char cell"
     if bbox and page_w > 0 and page_h > 0:
         x0, top, x1, bottom = (float(v) for v in bbox)
         area = ((x1 - x0) * (bottom - top)) / (page_w * page_h)
         if area >= TABLE_FRAME_AREA_FRAC:
-            return f"single column, bbox covers {area:.0%} of page"
+            return f"page frame: {shape}, bbox covers {area:.0%} of page"
     return None
+
+
+# === Running-header / footer pseudo-table rejection ===
+# A second family of fabricated tables, mechanically distinct from the page-frame one above.
+# Page FURNITURE — a running-header band, a shaded chapter-title bar, an e-reader "Back" nav bar —
+# is drawn as nested or stacked rectangles. Those rectangles intersect, so find_tables() returns a
+# small table sitting entirely inside the top (or bottom) margin band, which then harvests whatever
+# text falls in it: the running head, the folio, and — where the furniture overlays the text block —
+# the first line or two of body prose, interleaved with the furniture's own words.
+#
+# It escapes page_frame_reject_reason() by construction: it is not a 1-column page dump. Measured
+# column counts are 2-3, the largest cell is ~125 chars, and the bbox covers ~4% of the page, so all
+# three of that predicate's branches miss it.
+#
+# Measured (faketable-rootcause.md): 47 books / 1,313 sampled pages / 241 tables that survive
+# production today. 67 (27.8%) lie entirely inside a 0.10 band, spread over 5 books; each was read
+# as a rendered PNG against its extracted markdown, and every one was furniture — a running head
+# ("Section 2 Therapy", "FURTHER READING 19"), a chapter-title bar, or a box title — never a table.
+# The drop costs no content: distinct-token retention in the page prose that render_page_text()
+# emitted immediately above is 100% on every case measured (the single exception is a token the
+# furniture itself corrupted, "FiBnakc" for "Fink", whose correct form is in the prose).
+#
+# Both constants come from the measured distribution rather than from taste:
+#   * BAND_FRAC — the highest furniture table ends at 0.097 of page height and the next candidate
+#     above it starts at 0.135, a clean 0.038-wide gap; 0.10 sits inside that gap. It is deliberately
+#     NOT reused from TABLE_MERGE_MARGIN_FRAC (0.08): that constant answers a different question
+#     ("is this heading body text?"), and 0.08 would clear the worst book (Steffens, 0.076) by only
+#     5% of the band.
+# A text-volume guard ("...and holds under N characters") was tried and REJECTED. It is inert on the
+# 47-book sample (largest furniture table there = 125 chars) but it defeats the very worst case:
+# Steffens' nav bar overlays the text block, so its pseudo-table swallows the first two lines of body
+# prose and reaches ~366 chars — a cap tight enough to be a meaningful guard (200) left 7 of 8
+# sampled Steffens pages unfixed. Geometry alone is both sufficient and safer: the top/bottom tenth
+# of a page is margin, so a table lying ENTIRELY inside it is furniture by construction, and a real
+# table reaching into the body is untouched no matter how little text it holds.
+#
+# Kill-switch: set T2N_TABLE_FURNITURE_REJECT=0 to restore the old (defective) behavior. Defaults ON,
+# like T2N_TABLE_FRAME_REJECT — this corrects output that is currently wrong, so default-OFF would
+# preserve the bug.
+TABLE_FURNITURE_BAND_FRAC = 0.10   # band a table must lie ENTIRELY within to count as furniture
+
+
+def page_furniture_reject_reason(rows, bbox, page_h: float) -> str | None:
+    """Reason string if this candidate table is a running-header/footer pseudo-table that should be
+    discarded, else None. Fires only when the bbox lies ENTIRELY inside the top or bottom furniture
+    band, so any table that reaches into the page body is never at risk."""
+    if os.environ.get("T2N_TABLE_FURNITURE_REJECT", "1") == "0":
+        return None
+    if not rows or not bbox or not page_h or page_h <= 0:
+        return None
+    top, bottom = float(bbox[1]), float(bbox[3])
+    band = TABLE_FURNITURE_BAND_FRAC * page_h
+    if bottom <= band:
+        where = "running-header"
+    elif top >= page_h - band:
+        where = "running-footer"
+    else:
+        return None
+    chars = sum(len(str(c)) for r in rows for c in r if c)
+    return f"{where} band only, {chars} chars, spans {top / page_h:.0%}-{bottom / page_h:.0%} of page height"
 
 
 def extract_tables_md(plumber_page) -> tuple[list[str], list[str]]:
@@ -375,7 +466,9 @@ def extract_tables_md(plumber_page) -> tuple[list[str], list[str]]:
         md = _table_to_md(rows)
         if not md:
             continue
-        reason = page_frame_reject_reason(rows, getattr(table, "bbox", None), page_w, page_h)
+        bbox = getattr(table, "bbox", None)
+        reason = (page_frame_reject_reason(rows, bbox, page_w, page_h)
+                  or page_furniture_reject_reason(rows, bbox, page_h))
         if reason:
             rejects.append(reason)
             continue
@@ -465,7 +558,9 @@ def _gather_page_tables(plumber_page, fitz_page, page_num: int) -> tuple[list[di
             continue
         # Same page-frame reject as the plain path, so the merge path cannot resurrect the defect
         # (and cannot stitch two page-frame pseudo-tables into an even larger one).
-        reason = page_frame_reject_reason(rows, getattr(t, "bbox", None), page_w, page_h)
+        _bbox = getattr(t, "bbox", None)
+        reason = (page_frame_reject_reason(rows, _bbox, page_w, page_h)
+                  or page_furniture_reject_reason(rows, _bbox, page_h))
         if reason:
             rejects.append(reason)
             continue
@@ -609,8 +704,16 @@ def render_page_text(page, page_num: int) -> tuple[str, int]:
     return annotate_fig_refs(page_text, page_num)
 
 
-def convert_pdf(pdf_path: str, out_path: str, book_label: str) -> dict:
-    """Convert a single PDF to markdown. Returns stats dict."""
+def convert_pdf(pdf_path: str, out_path: str, book_label: str, table_worker=None) -> dict:
+    """Convert a single PDF to markdown. Returns stats dict.
+
+    `table_worker` is an optional live DoclingTableWorker. It is a PARAMETER rather than
+    something built here because Docling costs ~4-12 s of model load on its first call and the
+    same warm process is reusable across different PDFs (measured: switching books mid-session
+    does not reload models). Building one per book would pay that cold start ~288 times over a
+    corpus run. Batch callers build one worker and pass it to every book; a standalone
+    single-PDF invocation passes None and gets a private worker (paying the cold start once,
+    which is fine for one book)."""
     doc = fitz.open(pdf_path)
     plumber = pdfplumber.open(pdf_path)
     total_pages = len(doc)
@@ -628,6 +731,37 @@ def convert_pdf(pdf_path: str, out_path: str, book_label: str) -> dict:
     table_gate_on = os.environ.get("T2N_TABLE_GATE", "1") != "0"
     merge_on = os.environ.get("T2N_TABLE_MERGE", "0") == "1"  # Improvement 3, default OFF
 
+    # Docling table rung (default OFF: a new capability, not a fix to currently-wrong output, so
+    # it follows T2N_TABLE_MERGE's convention rather than T2N_TABLE_FRAME_REJECT's). When on, the
+    # SAME page gate decides which pages are worth an engine call — Docling is only ever asked
+    # about pages page_has_table_candidate() already flagged, never the whole book. Docling
+    # replaces pdfplumber as the table source for a page only when it actually returns a table;
+    # otherwise the page falls back to pdfplumber, whose known collapse modes are still caught by
+    # page_frame_reject_reason(). The fitz text stream is never touched by Docling: it reorders
+    # page content (observed interleaving unrelated body prose between two halves of a table), so
+    # only its TABLES are taken, never its reading order.
+    docling_on = os.environ.get("T2N_DOCLING", "0") == "1"
+    docling_note = None
+    owns_worker = False
+    if docling_on:
+        if DoclingTableWorker is None:
+            docling_on = False
+            docling_note = f"T2N_DOCLING=1 but docling_tables could not be imported ({_DOCLING_IMPORT_ERROR}); used pdfplumber only"
+        elif merge_on:
+            # The merge path's continuation logic reads pdfplumber geometry (xedges/bbox). Wiring
+            # Docling into it needs that logic ported to Docling's cell coordinates, which is a
+            # separate piece of work — until then the two features are mutually exclusive rather
+            # than silently producing a half-Docling, half-pdfplumber merge.
+            docling_on = False
+            docling_note = "T2N_DOCLING=1 ignored: not yet supported together with T2N_TABLE_MERGE=1"
+        elif table_worker is None:
+            table_worker = DoclingTableWorker()
+            owns_worker = True
+
+    total_docling_tables = 0
+    total_flagged = 0
+    total_repairs = 0
+
     if not merge_on:
         # Plain per-page path — byte-identical to the pre-merge output.
         for i in range(total_pages):
@@ -641,10 +775,38 @@ def convert_pdf(pdf_path: str, out_path: str, book_label: str) -> dict:
 
             # Improvement 2: only run the expensive pdfplumber pass on pages that plausibly hold a
             # table. Skipped pages never touch plumber.pages[i], so they don't pay the parse cost.
+            # md_tables holds (markdown, qc_flags) pairs. With T2N_DOCLING off every pair carries
+            # an empty flag list, so nothing extra is emitted and the output stays byte-identical
+            # to the pdfplumber-only version.
             md_tables, rejects = [], []
             try:
                 if not (table_gate_on and not page_has_table_candidate(doc[i], page_text)):
-                    md_tables, rejects = extract_tables_md(plumber.pages[i])
+                    if docling_on:
+                        for dt in table_worker.tables_for_page(pdf_path, i + 1):
+                            # Ligature repair runs BEFORE _table_to_md and before the QC checks,
+                            # so both the emitted markdown and the retention check see the
+                            # corrected text. It is the one place in this pipeline that rewrites
+                            # content rather than flagging it, which is allowed only because
+                            # every rewrite is gated on the source PDF's own text layer: a token
+                            # changes only when its current spelling is absent from the page and
+                            # the proposed one is present there. No oracle => no repair.
+                            dt.rows, repairs, _ = repair_ligatures(dt, doc=doc)
+                            md = _table_to_md(dt.rows)
+                            if md:
+                                total_repairs += len(repairs)
+                                flags = qc_flags(dt, pdf_path=pdf_path, doc=doc)
+                                if repairs:
+                                    # Repairs are traced separately from QC flags: a repaired
+                                    # cell is not "unverified", it is verified-and-corrected.
+                                    md = format_repair_marker(i + 1, repairs) + "\n" + md
+                                md_tables.append((md, flags))
+                        total_docling_tables += len(md_tables)
+                    if not md_tables:
+                        # Either Docling is off, or it found nothing here. pdfplumber still gets
+                        # its turn: it catches borderless cases Docling misses, and its own
+                        # collapse modes remain guarded by page_frame_reject_reason().
+                        plain, rejects = extract_tables_md(plumber.pages[i])
+                        md_tables = [(m, []) for m in plain]
             except Exception as e:
                 # Count, don't swallow. A single unparseable page and a wholly unopenable book used
                 # to look identical here (both produced zero tables and zero output); now the page
@@ -652,11 +814,17 @@ def convert_pdf(pdf_path: str, out_path: str, book_label: str) -> dict:
                 page_errors.append((i + 1, type(e).__name__, str(e)[:200]))
             for reason in rejects:
                 total_rejected += 1
-                output.append(f"\n<!-- ⚠️ page-frame pseudo-table rejected on page {i+1} "
+                output.append(f"\n<!-- ⚠️ pseudo-table rejected on page {i+1} "
                               f"({reason}) — its text is retained in the page prose above -->")
-            for j, tbl in enumerate(md_tables):
+            for tbl, flags in md_tables:
                 total_tables += 1
                 output.append(f"\n**[Table on page {i+1}]**\n")
+                if flags:
+                    # Flag, never reject and never auto-fix: the downstream note-writing LLM must
+                    # be able to see that this table needs checking against the PDF before it is
+                    # cited as clean data.
+                    total_flagged += 1
+                    output.append(format_trace_marker(i + 1, flags))
                 output.append(tbl)
                 output.append("")
     else:
@@ -686,7 +854,7 @@ def convert_pdf(pdf_path: str, out_path: str, book_label: str) -> dict:
             output.append(page_texts[i])
             for reason in page_rejects[i]:
                 total_rejected += 1
-                output.append(f"\n<!-- ⚠️ page-frame pseudo-table rejected on page {i+1} "
+                output.append(f"\n<!-- ⚠️ pseudo-table rejected on page {i+1} "
                               f"({reason}) — its text is retained in the page prose above -->")
             for md, cont_pages, anchor_page in emit_blocks.get(i, []):
                 total_tables += 1
@@ -697,11 +865,25 @@ def convert_pdf(pdf_path: str, out_path: str, book_label: str) -> dict:
                 output.append("")
 
     plumber_pages = len(plumber.pages) if detect_on else None
+    docling_status = table_worker.status() if (docling_on and table_worker is not None) else None
     doc.close()
     plumber.close()
+    if owns_worker and table_worker is not None:
+        # Only a worker this call created is closed here. A worker passed in by a batch caller
+        # outlives this book on purpose — that is the whole point of hoisting the cold start.
+        table_worker.close()
 
     # Book-level failure detection (pure detection — nothing about extraction changes here).
     warnings_out = []
+    if docling_note:
+        warnings_out.append(docling_note)
+    if docling_status and (docling_status.get("disabled") or docling_status.get("last_error")):
+        # A Docling worker that died or was disabled mid-book is not a silent event: the book's
+        # tables after that point came from pdfplumber, which is a different quality baseline.
+        warnings_out.append(
+            f"Docling worker degraded during this book (disabled={docling_status.get('disabled')}, "
+            f"restarts={docling_status.get('consecutive_restarts')}, "
+            f"last_error={docling_status.get('last_error')}) — affected pages fell back to pdfplumber")
     if detect_on:
         if plumber_pages == 0 and total_pages > 0:
             warnings_out.append(
@@ -738,6 +920,13 @@ def convert_pdf(pdf_path: str, out_path: str, book_label: str) -> dict:
         "table_captions": total_captions,
         "page_errors": len(page_errors),
         "warnings": warnings_out,
+        # Docling rung telemetry. `docling_tables` counts tables sourced from Docling (the rest of
+        # `tables` came from the pdfplumber fallback); `flagged_tables` counts tables carrying at
+        # least one QC flag. Both are 0 when the rung is off, so the corpus run can be audited for
+        # how much of the output each engine actually produced.
+        "docling_tables": total_docling_tables,
+        "flagged_tables": total_flagged,
+        "ligature_repairs": total_repairs,
     }
 
 

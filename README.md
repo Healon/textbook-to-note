@@ -116,3 +116,19 @@ This tool ships **no textbook content**. It operates on PDFs you already own —
 ## License
 
 MIT © Po-Wei Chen ([drpwchen](https://github.com/drpwchen))
+
+### A note on dependency licenses
+
+This project's own code is MIT. Two dependencies carry stronger terms you should be aware of if
+you redistribute or offer this as a network service:
+
+- **PyMuPDF** (`fitz`), a required dependency, is **AGPL-3.0** (or a commercial license from
+  Artifex). It is the core PDF reader and is not optional. If you build a closed-source product
+  or a hosted service on top of this tool, evaluate that obligation for yourself.
+- **Docling**, the optional table engine (`T2N_DOCLING=1`), is MIT end-to-end (`docling`,
+  `docling-core`, `docling-ibm-models`, `docling-parse`). It is **not** installed by default and
+  is not in `requirements.txt`; it runs in its own virtual environment and is reached by
+  subprocess, so it is a pluggable tool rather than a linked dependency.
+
+This is disclosure, not legal advice — licenses change, so verify against the versions you
+actually install.

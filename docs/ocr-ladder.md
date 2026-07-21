@@ -41,6 +41,34 @@ particular, its output quality was too poor to be usable, and every project
 that tried it ended up needing a better engine anyway. Skip straight to a
 modern OCR model (step 2).
 
+## The table rung (orthogonal to the OCR ladder)
+
+The ladder above is about *reading text off a page*. Extracting **table
+structure** is a separate problem, and it bites even on born-digital pages the
+OCR ladder never touches: `pdfplumber` finds tables by ruling lines, so it
+silently drops borderless / shaded-row tables and collapses some multi-column
+tables into one column (values survive but the row↔column binding is
+destroyed — worse than a missing table, because it reads as clean data).
+
+`T2N_DOCLING=1` (default **off**) adds [Docling](https://github.com/DS4SD/docling)
+as an alternative table source. It is invoked **only on pages the existing
+table gate already flags** — never the whole book — and only replaces
+`pdfplumber` for a page when it actually returns a table; otherwise that page
+falls back to `pdfplumber`, whose known collapse modes stay guarded by the
+page-frame and page-furniture rules. **The fitz text stream is never handed to
+Docling** — it reorders page content, so only its *tables* are used, never its
+reading order.
+
+Docling runs as a persistent worker in its own venv over a line-delimited JSON
+protocol (model cold start ~4–12 s, reused across the whole batch), and its
+tables pass through the same flag-only QC gate as everything else
+(content-retention, ragged-row, empty-first-cell, run-together, multi-value,
+single-column) plus an oracle-gated ligature repair (`T2N_LIGATURE_REPAIR`,
+default on) that fixes glyph-drop corruption (`speciic` → `specific`) only when
+the source page's own text layer confirms the correct spelling. It is MIT and
+**not** in `requirements.txt` — install it separately and point
+`DOCLING_VENV_PY` at its interpreter.
+
 General rule: **any page with an image gets OCR'd even if it already has a
 text layer.** A native text layer is a cross-check, never a reason to skip
 OCR — see the silent-failure detection below for why a text layer can lie.

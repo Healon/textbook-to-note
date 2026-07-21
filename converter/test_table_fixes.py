@@ -106,7 +106,7 @@ md1, st1 = convert(p1, "on")
 check("case1: page-frame pseudo-table is not emitted as a table",
       md1.count("**[Table on page") == 0, f"blocks={md1.count('**[Table on page')}")
 check("case1: rejection leaves a visible trace comment (loss is never silent)",
-      "page-frame pseudo-table rejected on page 1" in md1)
+      "pseudo-table rejected on page 1" in md1)
 check("case1: rejection is counted in stats",
       st1["rejected_tables"] >= 1, f"rejected={st1['rejected_tables']}")
 check("case1: the page prose itself survives the rejection",
@@ -178,7 +178,7 @@ doc.close()
 
 md3, st3 = convert(p3, "on")
 check("case3: long 1-column boxed list is dropped, with a trace",
-      md3.count("**[Table on page") == 0 and "page-frame pseudo-table rejected" in md3,
+      md3.count("**[Table on page") == 0 and "pseudo-table rejected" in md3,
       f"blocks={md3.count('**[Table on page')}")
 check("case3: its text is still present in the page prose (no content loss)",
       "Absolute contraindications to exercise testing" in md3.replace("\n", " "))
@@ -254,7 +254,207 @@ md6_off, st6_off = convert(p6, "off", {"T2N_BOOK_TABLE_CHECK": "0"})
 check("case6: kill-switch silences the book-level detector",
       st6_off["warnings"] == [] and "[!warning]" not in md6_off, f"warnings={st6_off['warnings']}")
 
+# ── case 7: running-header furniture pseudo-table (T2N_TABLE_FURNITURE_REJECT) ─
+# The second fabricated-table family (faketable-rootcause.md BUG 2). Page furniture — a running
+# header, a shaded chapter bar, an e-reader nav bar — is drawn as stacked/nested rectangles that
+# intersect, so find_tables() returns a small table lying entirely inside the top margin band. It
+# escapes page_frame_reject_reason() by construction: it is not a 1-column page dump (measured
+# column counts are 2-3, bbox ~4-8% of the page).
+def add_nav_bar(doc, page):
+    """The e-reader furniture that fools pdfplumber, using the exact rectangle set measured on
+    Steffens_APA-Textbook-Geriatric-Psychiatry_6e_2022 p200 (a PDF-XChange capture of a web
+    reader; its sticky "< Back" bar is baked into all 1,128 pages).
+
+    Do NOT rewrite this with page.draw_rect() — it cannot reproduce the bug, and that costs an
+    afternoon to rediscover. Two reasons, both measured:
+      1. fitz emits draw_rect() as a STROKED PATH, which pdfplumber classifies as a `curve`, not
+         a `rect` (verified: rects=0, curves=2, edges=10, tables=0 at every stroke width tried).
+         The real file uses filled `re` operators, so the fixture appends a raw content stream.
+      2. The two nav-bar rectangles are NESTED, and nested rectangles never intersect, so on
+         their own they yield no table at all (verified: rects=2, edges=8, tables=0). The one
+         vertical that closes the grid comes from the TALL VIEWPORT RECT, whose left edge at
+         x=567 runs the height of the page and cuts through the header band. It must be present.
+
+    With all of it: rects=5, edges=20, tables=2, header table ncols=3 / content_cols=2 / rows=2 —
+    the real Steffens output reproduced exactly."""
+    H = float(page.rect.height)
+
+    def re_(x0, t0, x1, t1):            # top-origin rect -> PDF bottom-origin `re f`
+        return "%f %f %f %f re f " % (x0, H - t1, x1 - x0, t1 - t0)
+
+    stream = ("q 1 1 1 rg "
+              + re_(567.0, 26.9, 1105.5, 812.2)    # viewport rect, drawn twice, extends off-page
+              + re_(567.0, 26.9, 1105.5, 812.2)    # its left edge at x=567 is the only vertical
+              + re_(23.3, 21.7, 572.2, 62.3)       # nav-bar outer band
+              + re_(28.5, 26.9, 567.0, 56.9)       # nav-bar inner bar (nested inside the outer)
+              + re_(23.3, 807.7, 572.2, 818.8)     # footer band
+              + "Q\n").encode()
+    xref = page.get_contents()[0]
+    doc.update_stream(xref, doc.xref_stream(xref) + stream)
+
+
+p7 = tmp / "case7_nav_bar.pdf"
+doc = fitz.open()
+pg = doc.new_page(width=PAGE_W, height=PAGE_H)
+# Body prose starts INSIDE the top band, exactly as in Steffens: the nav bar is an opaque overlay
+# sitting on top of live text, so the pseudo-table harvests real prose rather than furniture text.
+pg.insert_textbox(fitz.Rect(39.8, 26.0, 556.0, 800.0),
+                  "Delirium assessments are described in Table 2. " + LOREM * 8, fontsize=9)
+pg.insert_text((55.7, 48.0), "Back", fontsize=9)
+add_nav_bar(doc, pg)
+doc.save(str(p7))
+doc.close()
+
+md7, st7 = convert(p7, "on")
+check("case7: running-header furniture pseudo-table is not emitted as a table",
+      md7.count("**[Table on page") == 0, f"blocks={md7.count('**[Table on page')}")
+check("case7: rejection leaves a visible trace comment naming the band",
+      "running-header band only" in md7)
+check("case7: rejection is counted in stats",
+      st7["rejected_tables"] >= 1, f"rejected={st7['rejected_tables']}")
+check("case7: the body prose the nav bar overlaid survives the rejection",
+      "Antihistamine and decongestant" in md7.replace("\n", " "))
+
+md7_off, st7_off = convert(p7, "off", {"T2N_TABLE_FURNITURE_REJECT": "0"})
+check("case7: kill-switch restores the old behavior (furniture pseudo-table comes back)",
+      md7_off.count("**[Table on page") == 1 and "running-header band only" not in md7_off,
+      f"blocks={md7_off.count('**[Table on page')}")
+
+# ── case 8: a genuine table reaching into the page body is NOT furniture ─────
+# The guard that matters: the predicate fires on geometry alone, so a real table must survive as
+# long as it reaches out of the band. Starts at y=40 (inside the 84.2pt band) and ends at y=160.
+p8 = tmp / "case8_table_from_top.pdf"
+doc = fitz.open()
+pg = doc.new_page(width=PAGE_W, height=PAGE_H)
+draw_grid(pg, 60, 40, [130, 130, 130], 24, TABLE_ROWS)
+doc.save(str(p8))
+doc.close()
+
+md8, st8 = convert(p8, "on")
+check("case8: a genuine table starting in the band but reaching the body is kept",
+      md8.count("**[Table on page") == 1, f"blocks={md8.count('**[Table on page')}")
+check("case8: its column bindings are intact",
+      "| Neer sign | 88.7% | 30.5% |" in md8)
+
+# ── case 9: KNOWN LIMITATION — a real table lying ENTIRELY in the band is dropped ──
+# Not a passing guard: this pins a real false positive so it fails loudly if anyone changes it.
+# A genuine 3-column table with intact bindings, short enough to fit inside the top 84.2pt band
+# (3 rows at 16pt, bottom at 8.6% of page height), IS rejected as furniture. Geometry alone
+# cannot tell it from a running header, which is the documented cost of the geometry-only rule.
+#
+# The cost was then MEASURED (faketable-rootcause.md, "BUG 2 follow-up"): 44 books / 1,980 random
+# pages / 31 furniture-band hits, every hit rendered or read. 30 were genuine furniture; exactly
+# ONE was a real table — and it cost zero characters, because render_page_text() had already
+# emitted every word of it in the page prose above. So the limitation this case pins is real but
+# structural, not content loss.
+#
+# Three narrowing signals were tested against that measurement and ALL THREE FAIL — do not
+# re-propose them without new data:
+#   * content_cols >= 3 — the real false positive has 2, exactly like the Steffens pseudo-tables.
+#     (This synthetic fixture's 3 columns are NOT representative; that is why it stays a fixture.)
+#   * row count — every hit in the sample, real and fake alike, is rows=2.
+#   * character volume — the real false positive is 90 chars, inside the furniture range (6-285).
+# Content-BEARING rows do separate ordinary running heads (1) from a real fragment (2) — but
+# Steffens is also 2, so that guard resurrects the exact defect the rule exists for.
+#
+# The realistic shape is NOT a continuation-table tail. Measured over 1,263 consecutive pages in
+# the 8 most table-rich books, 20 real cross-page continuations were found and NONE lay inside the
+# band: the closest tail bottom sits at 0.135 of page height, clear of the 0.10 band by 3.5pp.
+# The one real false positive was a continuation-table HEADER — the repeated column header plus a
+# section row of a "Table 4.5 › continued" table, with the data rows below it never resolved as a
+# table at all. Note the interaction with the merge feature (currently default-OFF):
+# _gather_page_tables() applies this same predicate, and TABLE_MERGE_TOP_FRAC = 0.28 expects a
+# continuation to start within the top 28% — so a tail inside the top 10% would be dropped BEFORE
+# the merge could stitch it. Latent, never observed to fire; fix the ordering when merge ships.
+p9 = tmp / "case9_real_table_in_band.pdf"
+doc = fitz.open()
+pg = doc.new_page(width=PAGE_W, height=PAGE_H)
+draw_grid(pg, 60, 24, [120, 90, 90], 16, TABLE_ROWS[:3])
+pg.insert_textbox(fitz.Rect(60, 300, 520, 700), LOREM * 4, fontsize=9)
+doc.save(str(p9))
+doc.close()
+
+md9, st9 = convert(p9, "on")
+check("case9: KNOWN LIMITATION — a real table entirely inside the band is rejected as furniture",
+      md9.count("**[Table on page") == 0 and "running-header band only" in md9,
+      f"blocks={md9.count('**[Table on page')}")
+md9_off, st9_off = convert(p9, "off", {"T2N_TABLE_FURNITURE_REJECT": "0"})
+check("case9: ...and the kill-switch is the escape hatch for it (table returns intact)",
+      "| Neer sign | 88.7% | 30.5% |" in md9_off,
+      f"blocks={md9_off.count('**[Table on page')}")
+
+# ── case 10: doubled page frame with ZERO rulings (the AAP geometry) ─────────
+# Regression pin for faketable-rootcause.md BUG 1. AAP_Pediatric-Clinical-Practice-Guidelines
+# pp.358-368 carry NO line segments at all — only a running-header rectangle drawn twice and a
+# content frame drawn twice ~1pt apart. case1 uses a frame plus an explicit rule, a different
+# shape, so nothing currently pins this one. (The suspected "header hairline + column gutter read
+# as rulings" was refuted: fitz reports n_lines=0, n_curves=0 on those pages.)
+p10 = tmp / "case10_doubled_frame.pdf"
+doc = fitz.open()
+pg = doc.new_page(width=PAGE_W, height=PAGE_H)
+pg.draw_rect(fitz.Rect(30.0, 23.5, 574.0, 41.5), width=0.7)    # running-header box
+pg.draw_rect(fitz.Rect(30.0, 23.5, 574.0, 41.5), width=0.7)    # ...drawn a second time
+pg.draw_rect(fitz.Rect(23.4, 47.5, 578.6, 753.0), width=0.7)   # content frame
+pg.draw_rect(fitz.Rect(23.4, 48.5, 578.6, 757.0), width=0.7)   # ...and again, 1pt off
+pg.insert_textbox(fitz.Rect(40, 60, 290, 740), "See Table 3.1. " + LOREM * 6, fontsize=9)
+pg.insert_textbox(fitz.Rect(310, 60, 570, 740), LOREM * 6, fontsize=9)
+doc.save(str(p10))
+doc.close()
+
+md10, st10 = convert(p10, "on")
+check("case10: doubled page frame with no rulings is rejected as a page frame",
+      md10.count("**[Table on page") == 0 and "page frame" in md10,
+      f"blocks={md10.count('**[Table on page')}")
+check("case10: the two-column prose survives",
+      "Antihistamine and decongestant" in md10.replace("\n", " "))
+
+# ── case 11: content_cols blind spot (PR #1, @Alan9981) ─────────────────────
+# A frame whose right edge is doubled, so pdfplumber resolves TWO columns while every word lands
+# in the left one. The normalized count (2) walks past a `cols <= 1` bail-out; the content-bearing
+# count (1) does not. Measured across 56 books / 1,584 pages: 30 of 263 surviving tables (11.4%)
+# have this shape, every one of them page decoration.
+p11 = tmp / "case11_content_cols.pdf"
+doc = fitz.open()
+pg = doc.new_page(width=PAGE_W, height=PAGE_H)
+pg.draw_rect(fitz.Rect(25.0, 40.0, 570.0, 750.0), width=0.7)
+pg.draw_line((25.0, 60.0), (570.0, 60.0), width=0.7)      # spurious internal horizontal
+pg.draw_line((555.0, 40.0), (555.0, 750.0), width=0.7)    # narrow, permanently empty right column
+pg.insert_textbox(fitz.Rect(35, 70, 545, 740), "See Table 9. " + LOREM * 4, fontsize=9)
+doc.save(str(p11))
+doc.close()
+
+md11, st11 = convert(p11, "on")
+check("case11: 2-column candidate with one always-empty column is rejected",
+      md11.count("**[Table on page") == 0, f"blocks={md11.count('**[Table on page')}")
+check("case11: the trace comment reports the content-column shape, not the normalized one",
+      "content in 1 of 2 columns" in md11)
+
+md11_narrow, _ = convert(p11, "narrowoff", {"T2N_TABLE_FRAME_CONTENT_COLS": "0"})
+check("case11: narrow kill-switch restores pre-PR#1 behavior (the pseudo-table comes back)",
+      md11_narrow.count("**[Table on page") == 1,
+      f"blocks={md11_narrow.count('**[Table on page')}")
+
+md11_off, _ = convert(p11, "off", {"T2N_TABLE_FRAME_REJECT": "0"})
+check("case11: the whole-predicate kill-switch also restores it",
+      md11_off.count("**[Table on page") == 1, f"blocks={md11_off.count('**[Table on page')}")
+
+md11c, _ = convert(p8, "ccols_control")
+check("case11: a genuine 3-column table is unaffected by the content_cols widening",
+      md11c.count("**[Table on page") == 1 and "| Neer sign | 88.7% | 30.5% |" in md11c)
+
+
 # ── predicate unit checks ───────────────────────────────────────────────────
+def with_env(env, fn):
+    """Call fn() with a temporary env overlay (predicate-level equivalent of convert()'s)."""
+    old = {k: os.environ.get(k) for k in env}
+    os.environ.update(env)
+    try:
+        return fn()
+    finally:
+        for k, v in old.items():
+            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+
+
 big = "x" * 600
 check("predicate: 1 column + oversized cell → rejected",
       cv.page_frame_reject_reason([[big], ["y"]], (30, 40, 570, 800), PAGE_W, PAGE_H) is not None)
@@ -262,8 +462,47 @@ check("predicate: 1 column + page-covering bbox → rejected even with short cel
       cv.page_frame_reject_reason([["a"], ["b"]], (30, 40, 570, 800), PAGE_W, PAGE_H) is not None)
 check("predicate: 1 column, short cells, small bbox → kept",
       cv.page_frame_reject_reason([["a"], ["b"]], (60, 300, 260, 380), PAGE_W, PAGE_H) is None)
-check("predicate: multi-column is never rejected, however large the cell or bbox",
+# Renamed: "multi-column" is no longer the operative property — a multi-column candidate whose
+# content sits in ONE column is now rejected (see the content_cols checks below).
+check("predicate: multi-CONTENT-column is never rejected, however large the cell or bbox",
       cv.page_frame_reject_reason([[big, big], ["a", "b"]], (30, 40, 570, 800), PAGE_W, PAGE_H) is None)
+
+# content_cols (PR #1, @Alan9981)
+check("predicate: 2 ruled columns but content in only one → rejected",
+      cv.page_frame_reject_reason([[big, ""], ["a", ""]], (30, 40, 570, 800), PAGE_W, PAGE_H) is not None)
+check("predicate: ...and the reason names the content-column shape",
+      "content in 1 of 2 columns" in (cv.page_frame_reject_reason(
+          [[big, ""], ["a", ""]], (30, 40, 570, 800), PAGE_W, PAGE_H) or ""))
+check("predicate: content_cols kill-switch restores the pre-PR#1 bail-out",
+      with_env({"T2N_TABLE_FRAME_CONTENT_COLS": "0"},
+               lambda: cv.page_frame_reject_reason([[big, ""], ["a", ""]],
+                                                   (30, 40, 570, 800), PAGE_W, PAGE_H)) is None)
+check("predicate: content_cols widening still needs a size branch to fire "
+      "(tiny decoration is left alone)",
+      cv.page_frame_reject_reason([["CHAPTER 6", ""], ["", ""]],
+                                  (336, 30, 531, 99), PAGE_W, PAGE_H) is None)
+check("predicate: _content_col_count counts columns holding content, not ruled columns",
+      cv._content_col_count([["a", "", ""], ["b", "", ""]]) == 1
+      and cv._content_col_count([["a", "b", ""], ["c", "", ""]]) == 2)
+
+# furniture band (BUG 2)
+BAND = cv.TABLE_FURNITURE_BAND_FRAC * PAGE_H
+check("predicate: bbox entirely inside the top band → rejected as running-header",
+      "running-header" in (cv.page_furniture_reject_reason(
+          [["a", "b"], ["c", "d"]], (23, 23, 572, BAND - 20), PAGE_H) or ""))
+check("predicate: bbox entirely inside the bottom band → rejected as running-footer",
+      "running-footer" in (cv.page_furniture_reject_reason(
+          [["a", "b"], ["c", "d"]], (23, PAGE_H - BAND + 20, 572, PAGE_H - 5), PAGE_H) or ""))
+check("predicate: a bbox that crosses out of the band is never furniture",
+      cv.page_furniture_reject_reason([["a", "b"], ["c", "d"]],
+                                      (23, 23, 572, BAND + 1), PAGE_H) is None)
+check("predicate: furniture rule is geometry-only — text volume does not exempt it",
+      cv.page_furniture_reject_reason([[big, big], ["c", "d"]],
+                                      (23, 23, 572, BAND - 20), PAGE_H) is not None)
+check("predicate: furniture kill-switch disables the band rule",
+      with_env({"T2N_TABLE_FURNITURE_REJECT": "0"},
+               lambda: cv.page_furniture_reject_reason([["a", "b"], ["c", "d"]],
+                                                       (23, 23, 572, BAND - 20), PAGE_H)) is None)
 
 # ── report ──────────────────────────────────────────────────────────────────
 fails = [r for r in results if r[1] == "FAIL"]
