@@ -24,6 +24,12 @@ Feeding a raw PDF to a frontier model seems simple until you hit the real proble
 
 This pipeline treats each of those as a distinct engineering problem with a deliberate solution, organized as five stages.
 
+## Philosophy
+
+- **Local-first, token-frugal** — the expensive AI is reserved for synthesis, never mechanical page-by-page reading.
+- **Deterministic gates over AI vibes** — every figure crop and OCR page passes rule-based QC before an AI is allowed to judge it, and thresholds are *never* tuned just to make a failing case pass.
+- **Citations or it didn't happen** — every claim traces to book + chapter; AI-inferred additions are flagged.
+
 ## The five stages
 
 ### 1 · Convert — PDF/EPUB → clean markdown, 0 tokens
@@ -98,12 +104,6 @@ shared/       env-driven configuration (config.py)
 - **CPU-only is a first-class path** for born-digital PDFs (the common case) — no GPU needed
 - Optional, for scanned books and figure QC: an NVIDIA GPU or Apple Silicon + [Surya OCR](https://github.com/VikParuchuri/surya), [ollama](https://ollama.com) with a small vision model and `bge-m3` for embeddings — all local, nothing leaves your machine. See the hardware-tier table in [`docs/ocr-ladder.md`](docs/ocr-ladder.md).
 - Tested on Windows 11 and macOS; Windows-specific gotchas are handled in code (cp950 subprocess decoding, atomic-ish path ops)
-
-## Philosophy
-
-- **Local-first, token-frugal** — the expensive AI is reserved for synthesis, never mechanical page-by-page reading.
-- **Deterministic gates over AI vibes** — every figure crop and OCR page passes rule-based QC before an AI is allowed to judge it, and thresholds are *never* tuned just to make a failing case pass.
-- **Citations or it didn't happen** — every claim traces to book + chapter; AI-inferred additions are flagged.
 
 ## Bring your own books
 
