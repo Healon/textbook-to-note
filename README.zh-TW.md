@@ -24,6 +24,12 @@
 
 這套 pipeline 把上面每一項當成獨立的工程問題，各有刻意的解法，分成五關。
 
+## 設計哲學
+
+- **本機優先、省 token** — 昂貴的 AI 只留給綜合，絕不拿來逐頁讀書
+- **決定論的關卡，不靠 AI 感覺** — 每張圖、每個 OCR 頁面都先過規則式 QC，AI 才有資格判斷，而且閾值**永遠不為了讓失敗案例過關而調整**
+- **沒有引用就不算數** — 每條主張都追溯到書＋章節；AI 推論的內容明確標記
+
 ## 五道關卡
 
 ### 第一關 · 轉檔 — PDF/EPUB → 乾淨 markdown，0 token
@@ -98,12 +104,6 @@ shared/       環境變數驅動的設定（config.py）
 - **純 CPU 是一等公民路徑**（數位原生 PDF，最常見的情況），不需要 GPU
 - 選用（處理掃描書與圖片 QC）：NVIDIA GPU 或 Apple Silicon + [Surya OCR](https://github.com/VikParuchuri/surya)、[ollama](https://ollama.com) 加小視覺模型與 `bge-m3` embeddings，全部本機執行，資料不出你的電腦。見 [`docs/ocr-ladder.md`](docs/ocr-ladder.md) 的硬體分級表
 - 在 Windows 11 與 macOS 上測試過；Windows 特有的坑都在程式碼裡處理掉了（cp950 subprocess 解碼、路徑操作）
-
-## 設計哲學
-
-- **本機優先、省 token** — 昂貴的 AI 只留給綜合，絕不拿來逐頁讀書
-- **決定論的關卡，不靠 AI 感覺** — 每張圖、每個 OCR 頁面都先過規則式 QC，AI 才有資格判斷，而且閾值**永遠不為了讓失敗案例過關而調整**
-- **沒有引用就不算數** — 每條主張都追溯到書＋章節；AI 推論的內容明確標記
 
 ## 請用你自己的書
 
