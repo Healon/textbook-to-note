@@ -41,6 +41,10 @@ touched by this change, so the var is read locally here instead):
                         If unset or the path doesn't exist, `docling_available()` is False and
                         `DoclingTableWorker` degrades to always returning `[]` — never raises,
                         never blocks a run that doesn't have the venv configured.
+    DOCLING_DEVICE  -> `auto` (default) | `cuda` | `mps` | `cpu`. Read inside the worker, where
+                        torch is importable. `auto` probes CUDA, then Apple-Silicon MPS, then
+                        falls back to CPU — so a machine with no NVIDIA GPU no longer asks
+                        Docling for CUDA. An explicit value is always honored as given.
 
 ## QC gate
 
@@ -82,6 +86,32 @@ DOCLING_VENV_PY = Path(os.environ["DOCLING_VENV_PY"]) if os.environ.get("DOCLING
 
 def docling_available() -> bool:
     return bool(DOCLING_VENV_PY and DOCLING_VENV_PY.exists())
+
+
+DOCLING_DEVICES = ("cuda", "mps", "cpu")
+
+
+def resolve_docling_device(requested, cuda_available, mps_available) -> str:
+    """Resolve DOCLING_DEVICE to one of DOCLING_DEVICES.
+
+    Pure and side-effect-free so it can be unit-tested with no GPU and no torch: the two
+    probes are passed in as zero-arg callables rather than called here. They are also only
+    invoked when the answer actually depends on them, so an explicit `DOCLING_DEVICE=cpu`
+    never pays for a torch/CUDA probe.
+
+    `auto` (the default) is CUDA -> MPS -> CPU. The previous default was a hardcoded "cuda",
+    which asked Docling for a device that does not exist on a CPU-only or Apple-Silicon box.
+    """
+    name = (requested or "auto").strip().lower()
+    if name in DOCLING_DEVICES:
+        return name
+    if name != "auto":
+        print(f"[docling] unknown DOCLING_DEVICE {name!r}; resolving as 'auto'", file=sys.stderr)
+    if cuda_available():
+        return "cuda"
+    if mps_available():
+        return "mps"
+    return "cpu"
 
 
 # === Wire protocol data model (parent side) ================================================
@@ -394,8 +424,33 @@ def _worker_main() -> None:
     from docling.datamodel.accelerator_options import AcceleratorOptions, AcceleratorDevice
     from docling.document_converter import DocumentConverter, PdfFormatOption
 
-    device_name = os.environ.get("DOCLING_DEVICE", "cuda").lower()
-    device = AcceleratorDevice.CUDA if device_name == "cuda" else AcceleratorDevice.CPU
+    def _torch_probe(attr_path: str):
+        """Return a zero-arg probe that is False when torch (or that backend) is absent,
+        rather than raising — a missing probe must degrade to 'this device is unavailable'."""
+        def probe() -> bool:
+            try:
+                import torch
+                obj = torch
+                for part in attr_path.split("."):
+                    obj = getattr(obj, part)
+                return bool(obj())
+            except Exception:
+                return False
+        return probe
+
+    device_name = resolve_docling_device(
+        os.environ.get("DOCLING_DEVICE"),
+        _torch_probe("cuda.is_available"),
+        _torch_probe("backends.mps.is_available"),
+    )
+    print(f"[docling] accelerator device: {device_name}", file=sys.stderr)
+    # getattr fallback: MPS has been in docling's AcceleratorDevice since early versions, but a
+    # missing enum member must land on CPU rather than crash the worker at startup.
+    device = {
+        "cuda": AcceleratorDevice.CUDA,
+        "mps": getattr(AcceleratorDevice, "MPS", AcceleratorDevice.CPU),
+        "cpu": AcceleratorDevice.CPU,
+    }[device_name]
     acc = AcceleratorOptions(num_threads=8, device=device)
     po = PdfPipelineOptions()
     po.do_ocr = True

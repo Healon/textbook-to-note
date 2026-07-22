@@ -602,6 +602,40 @@ check("ligature: out-of-range page_no degrades to no-repair rather than raising"
       rows[1][0] == "speciic" and reps == [])
 
 
+# ── accelerator device resolution (DOCLING_DEVICE) ──────────────────────────
+# The resolver is pure and takes its probes as callables, so every branch is reachable with
+# no GPU and no torch. The MPS branch in particular can only ever be tested this way here --
+# there is no Apple Silicon in this environment, so the real-hardware path is unverified and
+# only the resolution logic is under test.
+_yes = lambda: True
+_no = lambda: False
+def _boom():  # a probe that must not be called at all
+    raise AssertionError("probe called when the answer was already determined")
+
+check("device: auto + CUDA present -> cuda",
+      dt.resolve_docling_device("auto", _yes, _no) == "cuda")
+check("device: auto + no CUDA + MPS present -> mps",
+      dt.resolve_docling_device("auto", _no, _yes) == "mps")
+check("device: auto + neither -> cpu (the CPU-only-machine regression)",
+      dt.resolve_docling_device("auto", _no, _no) == "cpu")
+check("device: unset (None) behaves as auto, not as the old hardcoded cuda",
+      dt.resolve_docling_device(None, _no, _no) == "cpu")
+check("device: empty string behaves as auto",
+      dt.resolve_docling_device("", _no, _no) == "cpu")
+for explicit in ("cuda", "mps", "cpu"):
+    check(f"device: explicit {explicit!r} is honored verbatim and probes nothing",
+          dt.resolve_docling_device(explicit, _boom, _boom) == explicit)
+check("device: explicit value is case/whitespace tolerant",
+      dt.resolve_docling_device("  CUDA  ", _boom, _boom) == "cuda")
+check("device: an unknown value falls back to auto rather than to a bad device",
+      dt.resolve_docling_device("tpu", _no, _no) == "cpu")
+check("device: CUDA is preferred over MPS when both probe true",
+      dt.resolve_docling_device("auto", _yes, _yes) == "cuda")
+check("device: the resolver only ever returns a device the worker can map",
+      all(dt.resolve_docling_device(v, _no, _no) in dt.DOCLING_DEVICES
+          for v in (None, "", "auto", "cpu", "mps", "cuda", "nonsense")))
+
+
 # ── report ──────────────────────────────────────────────────────────────────
 fails = [r for r in results if r[1] == "FAIL"]
 for name, status, detail in results:

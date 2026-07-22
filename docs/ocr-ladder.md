@@ -69,6 +69,13 @@ the source page's own text layer confirms the correct spelling. It is MIT and
 **not** in `requirements.txt` — install it separately and point
 `DOCLING_VENV_PY` at its interpreter.
 
+`DOCLING_DEVICE` picks the accelerator, and defaults to `auto`: CUDA if torch
+sees it, else Apple-Silicon MPS, else CPU. Set it explicitly (`cuda` | `mps` |
+`cpu`) only to override that probe — e.g. forcing `cpu` on a box whose GPU is
+already saturated by an OCR run. The resolution happens inside the worker,
+which is the only process with torch importable; the chosen device is printed
+to stderr at worker startup.
+
 General rule: **any page with an image gets OCR'd even if it already has a
 text layer.** A native text layer is a cross-check, never a reason to skip
 OCR — see the silent-failure detection below for why a text layer can lie.
