@@ -9,7 +9,9 @@ Env overrides:
     BOOKS_DIR           -> source PDFs/EPUBs (default: ./books)
     OUTPUT_DIR          -> markdown output root (default: ./output)
     SURYA_VENV_PY       -> path to a Surya OCR venv's Python interpreter (python.exe on Windows, bin/python on macOS/Linux) (optional)
-    SURYA_ADAPTER       -> path to a Surya adapter script (optional)
+    SURYA_ADAPTER       -> path to an OCR adapter script (optional); this repo ships
+                           converter/surya_adapter.py -- see docs/surya-adapter.md for the
+                           interface contract if you want to plug in a different engine
     INDEXER_SCRIPT      -> path to an external semantic indexer script (optional)
     VAULT_SEARCH_DIR    -> cache/index dir for an external indexer (optional)
     FIGURE_REGISTRY_SCRIPT -> path to a figure-registry generator script (optional)

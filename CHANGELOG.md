@@ -10,7 +10,45 @@ loose semantic versioning.
 
 ## [Unreleased]
 
+### Added
+- **A reference OCR adapter ships** — `converter/surya_adapter.py`, targeting Surya 0.22.x, plus
+  [`docs/surya-adapter.md`](docs/surya-adapter.md) ([#4](https://github.com/drpwchen/textbook-to-note/issues/4)).
+  `SURYA_ADAPTER` had been a first-class config value, required for `surya_available()`, executed
+  as a subprocess — and the file it pointed at existed only on the author's machine, with no
+  published interface. An agent following the setup guide reasonably assumed it was part of the
+  repo, could not find it, and reverse-engineered one against the removed `surya.ocr` API. The doc
+  now publishes the contract (JSON Lines on stdout, `fixture` + `blocks[].text` + **required**
+  `blocks[].bbox`, one line per image even when blank, logging on stderr, non-zero exit fails the
+  batch) so any engine can take that rung, and states plainly why an adapter written for Surya
+  0.17 dies on 0.22: `surya.ocr` is gone, `FoundationPredictor` became `SuryaInferenceManager`,
+  and blocks now carry `html` rather than flat text.
+- **Documented, tested memory caps for the OCR inference server.** Surya 0.22 serves its VLM
+  behind llama.cpp or vllm, and llama.cpp sizes its KV cache as
+  `parallel × ctx_per_slot` — defaulting to `8 × 12288 = 98304` tokens for a model whose weights
+  are ~1.4 GB. That cache, not the model, is what became a reported 48 GB run for one user. The
+  doc ships a launch command with the caps in it; measured peak RSS with them was **3121 MB**.
+- **OCR output QC gate** — the OCR rung now fails loud like every other rung. `surya_ocr_pdf()`
+  counts unparseable adapter lines, images with no answer, and empty pages, and **raises instead
+  of writing markdown** when the empty-page ratio exceeds `T2N_OCR_EMPTY_PAGE_MAX` (0.35) or mean
+  characters per page falls below `T2N_OCR_MIN_CHARS_PER_PAGE` (200). Previously a JSON parse
+  failure was silently `continue`d and a near-empty book reported success in KB — the shape of a
+  real incident where a scanned book produced 20 KB where ~1.6 MB was expected (~25 chars/page).
+  Thresholds are calibrated against two real scanned references (689 and 788 pages: empty ratios
+  0.054 / 0.003, mean 1791 / 2005 chars per page), so they clear legitimate blank and plate pages
+  by roughly an order of magnitude. Per-book counters are surfaced in the batch report.
+
 ### Fixed
+- **Two-column reading order on OCR'd pages** — the OCR path sorted blocks by `(y0, x0)`, which
+  walks across the gutter and back on every band of a two-column page, interleaving the columns.
+  Every character is present and individually correct, so no downstream check could see it — the
+  same defect the fitz path already carried a dedicated column sort for. Both paths now share one
+  `column_order_boxes()` (`T2N_COLUMN_SORT=0` restores the old sort on both). Byte-identity of the
+  fitz path across two full books was verified as part of the same re-conversion run used for #5.
+- **`DOCLING_DEVICE` defaults to `auto`** instead of a hardcoded `"cuda"`, resolving CUDA → Apple
+  Silicon MPS → CPU inside the worker. A CPU-only machine no longer asks Docling for CUDA, and
+  `mps` is now reachable at all (previously anything that wasn't the literal `"cuda"` mapped to
+  CPU). Resolution logic is unit-tested without torch or a GPU; **the real MPS path is unverified**
+  — there is no Apple Silicon in the development environment.
 - **pdfplumber page cache is released after each page** ([#5](https://github.com/drpwchen/textbook-to-note/issues/5)).
   `convert_pdf()` opened one `pdfplumber.PDF` for a whole book and reached into `plumber.pages[i]`
   per page. `PDF.pages` holds every materialized `Page` for the object's lifetime, and each `Page`

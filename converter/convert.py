@@ -146,6 +146,64 @@ COLUMN_MIN_LINES = 2     # each column needs at least this many lines before we 
                          # page is really two-column (guards against a stray short line).
 
 
+def column_order_boxes(items: list, page_w: float, page_x0: float = 0.0,
+                       min_items: int = 4) -> list | None:
+    """Reorder positioned text boxes into two-column reading order, or None when the page is
+    single-column / ambiguous (every caller then falls back to its own previous behaviour).
+
+    `items` are `(x0, y0, x1, y1, payload)` tuples in ONE coordinate space; the payload is
+    opaque. Two callers share this: `column_sorted_text()` passes fitz dict-mode *lines*, and
+    the OCR path passes an engine's *layout blocks*. They differ only in granularity, and the
+    geometry argument — which side of the gutter does this box sit on — is identical, so it
+    lives here once rather than being re-derived (and re-tuned) per rung.
+
+    `min_items` differs by caller because the granularities differ: four fitz lines is a
+    trivially low bar, four OCR layout blocks is already most of a page.
+    """
+    if len(items) < min_items:
+        return None
+
+    center = page_x0 + page_w / 2.0
+    tol = page_w * COLUMN_TOL_FRAC
+
+    full, left, right = [], [], []
+    for it in items:
+        x0, _, x1, _, _ = it
+        if x0 < center - tol and x1 > center + tol:
+            full.append(it)              # spans both columns → header/title/full-width para
+        elif (x0 + x1) / 2.0 < center:
+            left.append(it)
+        else:
+            right.append(it)
+
+    # Need two genuine clusters, or it's not a two-column page.
+    if len(left) < COLUMN_MIN_LINES or len(right) < COLUMN_MIN_LINES:
+        return None
+    # Gutter integrity: left boxes must end before center and right boxes start after it
+    # (with tolerance). Overlap across the center means the split is ambiguous → fall back.
+    if max(l[2] for l in left) > center + tol:
+        return None
+    if min(r[0] for r in right) < center - tol:
+        return None
+
+    # Emit in bands split by full-width boxes: for each band, left column top-to-bottom then
+    # right column top-to-bottom, with the full-width separator between bands. A box's band
+    # is the count of full-width boxes above it, so top full-width blocks (e.g. a heading) and
+    # their bands come first.
+    full.sort(key=lambda l: l[1])
+
+    def band(it):
+        return sum(1 for f in full if f[1] <= it[1])
+
+    ordered = []
+    for bi in range(len(full) + 1):
+        ordered.extend(sorted((l for l in left if band(l) == bi), key=lambda l: l[1]))
+        ordered.extend(sorted((r for r in right if band(r) == bi), key=lambda r: r[1]))
+        if bi < len(full):
+            ordered.append(full[bi])
+    return ordered
+
+
 def column_sorted_text(page) -> str | None:
     """Return page text reordered into two-column reading order, or None when the page is
     single-column / ambiguous (caller then falls back to plain get_text() → byte-identical to
@@ -167,49 +225,9 @@ def column_sorted_text(page) -> str | None:
             bb = ln["bbox"]
             lines.append((bb[0], bb[1], bb[2], bb[3], txt))
 
-    if len(lines) < 4:
+    ordered = column_order_boxes(lines, page.rect.width, page.rect.x0)
+    if ordered is None:
         return None
-
-    page_w = page.rect.width
-    center = page.rect.x0 + page_w / 2.0
-    tol = page_w * COLUMN_TOL_FRAC
-
-    full, left, right = [], [], []
-    for ln in lines:
-        x0, _, x1, _, _ = ln
-        if x0 < center - tol and x1 > center + tol:
-            full.append(ln)              # spans both columns → header/title/full-width para
-        elif (x0 + x1) / 2.0 < center:
-            left.append(ln)
-        else:
-            right.append(ln)
-
-    # Need two genuine clusters, or it's not a two-column page.
-    if len(left) < COLUMN_MIN_LINES or len(right) < COLUMN_MIN_LINES:
-        return None
-    # Gutter integrity: left lines must end before center and right lines start after it
-    # (with tolerance). Overlap across the center means the split is ambiguous → fall back.
-    if max(l[2] for l in left) > center + tol:
-        return None
-    if min(r[0] for r in right) < center - tol:
-        return None
-
-    # Emit in bands split by full-width lines: for each band, left column top-to-bottom then
-    # right column top-to-bottom, with the full-width separator between bands. A line's band
-    # is the count of full-width lines above it, so top full-width blocks (e.g. a heading) and
-    # their bands come first.
-    full.sort(key=lambda l: l[1])
-
-    def band(ln):
-        return sum(1 for f in full if f[1] <= ln[1])
-
-    ordered = []
-    for bi in range(len(full) + 1):
-        ordered.extend(sorted((l for l in left if band(l) == bi), key=lambda l: l[1]))
-        ordered.extend(sorted((r for r in right if band(r) == bi), key=lambda r: r[1]))
-        if bi < len(full):
-            ordered.append(full[bi])
-
     return "\n".join(l[4] for l in ordered)
 
 
@@ -1653,10 +1671,100 @@ def surya_available() -> bool:
     return bool(SURYA_VENV_PY and SURYA_ADAPTER and SURYA_VENV_PY.exists() and SURYA_ADAPTER.exists())
 
 
+# === OCR output QC ==========================================================================
+# The OCR rung used to accept anything the adapter produced: a line that failed to parse was
+# `continue`d, an image with no output line was invisible, and a book that came back almost
+# empty still reported success with a size in KB. That is the same silent-failure shape
+# docs/ocr-ladder.md exists to catch on the fitz side, and it has bitten for real -- a scanned
+# book once produced a 20 KB full_text.md where ~1.6 MB was expected, and nothing in the
+# pipeline said so.
+#
+# Two book-level gates, both env-tunable, both sized off real scanned books rather than taste.
+# Calibration (two scanned clinical references converted through this path, 689 and 788 pages):
+# empty-page ratios were 0.054 and 0.003, mean chars/page 1791 and 2005. So the defaults sit
+# ~6x above the worse observed empty ratio and ~9x below the lower observed char density --
+# scanned books legitimately contain blank, plate and figure-only pages, and the gate must not
+# fire on those. The 20 KB incident above works out to ~25 chars/page, an order of magnitude
+# under the floor.
+OCR_EMPTY_PAGE_MAX = 0.35
+OCR_MIN_CHARS_PER_PAGE = 200
+
+
+def ocr_quality_verdict(total_pages: int, empty_pages: int, chars_total: int,
+                        empty_page_max: float = None, min_chars_per_page: int = None) -> str | None:
+    """Return a diagnostic string if an OCR'd book looks like a failed conversion, else None.
+
+    Split out from surya_ocr_pdf() so the thresholds are testable without an OCR engine.
+    A book with zero pages is not judged: there is nothing to be wrong about, and the caller
+    already treats an empty PDF as its own error.
+    """
+    if total_pages <= 0:
+        return None
+    # Env is read here rather than at import so a caller can change a threshold for one book
+    # (and so the gate is testable) without reloading the module.
+    if empty_page_max is None:
+        try:
+            empty_page_max = float(os.environ.get("T2N_OCR_EMPTY_PAGE_MAX", OCR_EMPTY_PAGE_MAX))
+        except ValueError:
+            empty_page_max = OCR_EMPTY_PAGE_MAX
+    if min_chars_per_page is None:
+        try:
+            min_chars_per_page = int(os.environ.get("T2N_OCR_MIN_CHARS_PER_PAGE",
+                                                    OCR_MIN_CHARS_PER_PAGE))
+        except ValueError:
+            min_chars_per_page = OCR_MIN_CHARS_PER_PAGE
+    empty_ratio = empty_pages / total_pages
+    mean_chars = chars_total / total_pages
+    problems = []
+    if empty_ratio > empty_page_max:
+        problems.append(f"{empty_pages}/{total_pages} pages came back empty "
+                        f"({empty_ratio:.1%} > T2N_OCR_EMPTY_PAGE_MAX {empty_page_max:.1%})")
+    if mean_chars < min_chars_per_page:
+        problems.append(f"mean {mean_chars:.0f} chars/page "
+                        f"(< T2N_OCR_MIN_CHARS_PER_PAGE {min_chars_per_page})")
+    if not problems:
+        return None
+    return ("OCR output failed quality check: " + "; ".join(problems) +
+            ". This is what a silently-failed OCR run looks like — check the adapter's stderr, "
+            "the render DPI, and whether the inference server actually had the model loaded. "
+            "Raise the thresholds only if this book really is that sparse.")
+
+
+# Four OCR layout blocks is already most of a two-column page, whereas the fitz path counts
+# individual lines — same heuristic, different granularity, so the minimum differs.
+OCR_COLUMN_MIN_BLOCKS = 4
+
+
+def order_ocr_blocks(blocks: list, page_w: float) -> list[str]:
+    """Reading order for one OCR'd page. `blocks` are `(x0, y0, x1, y1, text)` in image pixels.
+
+    A plain `(y0, x0)` sort — what this path did before — is correct for single-column pages
+    and WRONG for two-column ones: it walks across the gutter and back on every band of the
+    page, interleaving the columns line by line. That is the same defect the fitz path has a
+    dedicated column sort for, and it is invisible to every quality check downstream because
+    the characters are all present and individually correct.
+
+    So: try the shared column split first, fall back to the old `(y0, x0)` sort when the page
+    is single-column or the split is ambiguous. `T2N_COLUMN_SORT=0` restores the old sort
+    unconditionally, same kill-switch as the fitz path.
+    """
+    if not blocks:
+        return []
+    if page_w > 0 and os.environ.get("T2N_COLUMN_SORT", "1") != "0":
+        ordered = column_order_boxes(blocks, page_w, 0.0, min_items=OCR_COLUMN_MIN_BLOCKS)
+        if ordered is not None:
+            return [b[4] for b in ordered]
+    return [b[4] for b in sorted(blocks, key=lambda b: (b[1], b[0]))]
+
+
 def surya_ocr_pdf(pdf_path: str, out_md_path: str, dpi: int = 300, batch_size: int = 20) -> dict:
     """OCR a PDF via Surya (GPU). Used when fitz extraction fails — CID Identity-H
     without ToUnicode or pure scan. Renders pages → calls adapter in isolated venv →
     writes full_text.md with <!-- page N --> markers. Returns stats dict.
+
+    Raises if the assembled book trips ocr_quality_verdict(). Failing loud here is
+    deliberate: a near-empty full_text.md that reports success is worse than no conversion,
+    because every downstream step then treats the book as done.
     """
     import tempfile
     if not surya_available():
@@ -1668,16 +1776,23 @@ def surya_ocr_pdf(pdf_path: str, out_md_path: str, dpi: int = 300, batch_size: i
     tmpdir = tempfile.mkdtemp(prefix="surya_")
     img_paths = []
     try:
+        page_widths = []  # rendered pixel width per page — the coordinate space the adapter
+                          # reports bboxes in, and what the column split needs to find the gutter
         for i in range(total):
             pix = doc[i].get_pixmap(dpi=dpi)
             p = os.path.join(tmpdir, f"p{i+1:04d}.png")
             pix.save(p)
             img_paths.append(p)
+            page_widths.append(float(pix.width))
         doc.close()
 
         pages_text = ["" for _ in range(total)]
+        parse_failures = 0      # stdout lines that were not valid JSON
+        unmatched_lines = 0     # lines whose "fixture" did not resolve to a page index
+        missing_lines = 0       # input images the adapter never emitted a line for
         for start in range(0, total, batch_size):
             batch = img_paths[start:start+batch_size]
+            seen_in_batch = set()
             result = subprocess.run(
                 [str(SURYA_VENV_PY), str(SURYA_ADAPTER)] + batch,
                 capture_output=True, timeout=1800
@@ -1695,23 +1810,56 @@ def surya_ocr_pdf(pdf_path: str, out_md_path: str, dpi: int = 300, batch_size: i
                 try:
                     obj = json.loads(line)
                 except Exception:
+                    # Counted, not swallowed: a malformed line means a page's text is gone,
+                    # and the old silent `continue` is exactly how a book ends up 20 KB.
+                    parse_failures += 1
                     continue
                 fname = obj.get("fixture", "")
                 try:
                     stem = fname.rsplit(".", 1)[0]  # "p0011"
                     idx = int(stem[1:]) - 1
                 except Exception:
+                    unmatched_lines += 1
                     continue
+                seen_in_batch.add(os.path.basename(fname))
                 items = []
                 for b in obj.get("blocks", []):
                     text = (b.get("text") or "").strip()
                     if not text:
                         continue
                     bbox = b.get("bbox") or [0, 0, 0, 0]
-                    items.append((bbox[1], bbox[0], text))
-                items.sort()
+                    try:
+                        x0, y0, x1, y1 = (float(v) for v in bbox[:4])
+                    except Exception:
+                        # A block with an unusable bbox cannot be placed; keep its text but
+                        # pin it at the origin, which is where the old `or [0,0,0,0]` default
+                        # put it too.
+                        x0 = y0 = x1 = y1 = 0.0
+                    items.append((x0, y0, x1, y1, text))
                 if 0 <= idx < total:
-                    pages_text[idx] = "\n".join(t for _, _, t in items)
+                    pages_text[idx] = "\n".join(order_ocr_blocks(items, page_widths[idx]))
+                else:
+                    unmatched_lines += 1
+
+            batch_missing = [os.path.basename(p) for p in batch
+                             if os.path.basename(p) not in seen_in_batch]
+            if batch_missing:
+                missing_lines += len(batch_missing)
+                print(f"    [warn] adapter returned no line for {len(batch_missing)} image(s): "
+                      f"{', '.join(batch_missing[:5])}"
+                      f"{' ...' if len(batch_missing) > 5 else ''}", flush=True)
+
+        empty_pages = sum(1 for t in pages_text if not t.strip())
+        chars_total = sum(len(t.strip()) for t in pages_text)
+        if parse_failures or unmatched_lines:
+            print(f"    [warn] adapter output: {parse_failures} unparseable line(s), "
+                  f"{unmatched_lines} line(s) with no matching page", flush=True)
+
+        verdict = ocr_quality_verdict(total, empty_pages, chars_total)
+        if verdict:
+            raise RuntimeError(
+                f"{verdict} (parse_failures={parse_failures}, missing_lines={missing_lines}, "
+                f"unmatched_lines={unmatched_lines})")
 
         md = []
         for i in range(total):
@@ -1719,7 +1867,10 @@ def surya_ocr_pdf(pdf_path: str, out_md_path: str, dpi: int = 300, batch_size: i
         Path(out_md_path).parent.mkdir(parents=True, exist_ok=True)
         Path(out_md_path).write_text("\n".join(md), encoding="utf-8")
         size_kb = round(Path(out_md_path).stat().st_size / 1024, 1)
-        return {"pages": total, "tables": 0, "fig_refs": 0, "size_kb": size_kb, "engine": "surya"}
+        return {"pages": total, "tables": 0, "fig_refs": 0, "size_kb": size_kb, "engine": "surya",
+                "empty_pages": empty_pages, "parse_failures": parse_failures,
+                "missing_lines": missing_lines, "unmatched_lines": unmatched_lines,
+                "chars_total": chars_total}
     finally:
         for p in img_paths:
             try: os.remove(p)
@@ -1806,7 +1957,11 @@ def batch_dir_convert(root_dir: Path, force: bool = False, force_surya: bool = F
             try:
                 out_dir.mkdir(parents=True, exist_ok=True)
                 stats = surya_ocr_pdf(str(pdf), str(full_text_path))
-                print(f"  [{converted + 1}/{len(all_pdfs)}] {pdf.name}: {stats['pages']}p (surya), {stats['size_kb']} KB", flush=True)
+                print(f"  [{converted + 1}/{len(all_pdfs)}] {pdf.name}: {stats['pages']}p (surya), "
+                      f"{stats['size_kb']} KB | empty={stats['empty_pages']} "
+                      f"chars/pg={stats['chars_total'] // max(stats['pages'], 1)} "
+                      f"parse_fail={stats['parse_failures']} missing={stats['missing_lines']}",
+                      flush=True)
                 converted += 1
                 total_pages_done += stats["pages"]
 

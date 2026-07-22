@@ -46,7 +46,7 @@ PyMuPDF 文字抽取，每頁約 130 毫秒。三個不那麼直覺的設計：
 - **整本書表格失敗偵測** — 表格遺失是雙峰分布：一本書要嘛抽得好好的，要嘛整本無聲全滅。若 `pdfplumber` 讀到 0 頁而 `fitz` 開得起來，或整本有 ≥10 個表格 caption 卻抽出 0 張表，轉檔報告與 markdown 本身都會出現明確警告，而不是什麼都沒有。純偵測，不改變抽取行為。在本語料庫 34 本零表格書中觸發 22 本，226 本正常抽表的書則一本都不誤報（`T2N_BOOK_TABLE_CHECK=0` 可關閉）
 - **書層級表格可靠度旗標** — 有些書天生對表格抽取充滿敵意：當一本書很大比例的表格觸發結構 QC flag 時，個別的 `⚠️` 標記無法傳達出「*整本書*的表格都不可信」。QC gate 看得到結構、看不到「值綁到錯的列」的錯綁，因此高 flag 率正是「這裡任何一張表沒對過 PDF 都別信」的代理指標。觸發判準是**內容遺失**而非「任何 QC flag」：6 本試點實測顯示，任何-flag 率在每本密集臨床書都落在 39-64%，根本分不出好壞；而 content-retention（頁面文字層有、卻沒進到任何 cell 的文字）則是 40/27/17/12/2/0%。若一本書 ≥`BOOK_CONTENT_LOSS_RATE`（25%）的表格（且至少 10 張）有內容遺失，markdown 最上方會掛一個 `> [!caution]` banner，告訴下游 LLM 每張表都要對照原始 PDF 查核，並把 `reliability_flagged` / `content_loss_rate` / `flag_rate` 寫進 per-book 統計。純偵測。
 
-掃描書與字型損壞的書會落入 **OCR 階梯** — Surya → PaddleOCR-VL → 本地視覺模型 → 大模型視覺（真正的最後手段）。*偵測*訊號是逐頁的（字元密度、字型風險旗標、領域樣式落空）；但目前實作的*路由*決策是**以整本書為單位**：一個 PDF 在 `--batch-dir` 執行中觸發檢查，整份檔案就送去 OCR，不是逐頁切換。逐頁路由是未來工作，所以請別把這個階梯讀成「同一本書內已經在混用引擎」。詳見 [`docs/ocr-ladder.md`](docs/ocr-ladder.md)，內含**硬體分級的模型選擇表**（無 GPU／Apple Silicon／NVIDIA 8GB／16GB+），讓你按自己的 VRAM 選引擎與 ollama 模型，而不是轉到一半 OOM。
+掃描書與字型損壞的書會落入 **OCR 階梯** — Surya → PaddleOCR-VL → 本地視覺模型 → 大模型視覺（真正的最後手段）。*偵測*訊號是逐頁的（字元密度、字型風險旗標、領域樣式落空）；但目前實作的*路由*決策是**以整本書為單位**：一個 PDF 在 `--batch-dir` 執行中觸發檢查，整份檔案就送去 OCR，不是逐頁切換。逐頁路由是未來工作，所以請別把這個階梯讀成「同一本書內已經在混用引擎」。專案**附一份參考 OCR adapter**（`converter/surya_adapter.py`，對應 Surya 0.22.x），介面有明文規格，換別的引擎不必動到 converter — 見 [`docs/surya-adapter.md`](docs/surya-adapter.md)，裡面也寫了**第一次啟動前就該設好的推論伺服器記憶體上限**。階梯本身詳見 [`docs/ocr-ladder.md`](docs/ocr-ladder.md)，內含**硬體分級的模型選擇表**（無 GPU／Apple Silicon／NVIDIA 8GB／16GB+），讓你按自己的 VRAM 選引擎與 ollama 模型，而不是轉到一半 OOM。
 
 ### 第二關 · 切塊 — 切成可語意搜尋的單位
 
@@ -95,7 +95,7 @@ converter/    PDF/EPUB → markdown（convert.py — 靜默失敗偵測＋雙欄
 figures/      圖片抽取 + 決定論 QC 閘門（進入點 figure_remap.py）
 skills/       可直接放入 Claude Code 的 skill 定義（textbook-to-md、figure-remap）
 workflows/    筆記撰寫演算法（可改造成你自己的筆記系統）
-docs/         架構、OCR 階梯 + 硬體分級模型表
+docs/         架構、OCR 階梯 + 硬體分級模型表、OCR adapter 介面規格
 examples/     目標筆記格式範例
 shared/       環境變數驅動的設定（config.py）
 ```

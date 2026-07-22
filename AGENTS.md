@@ -86,8 +86,10 @@ don't fit:
   user to read directly)
 - Optional OCR fallback: `SURYA_VENV_PY` + `SURYA_ADAPTER` — **skip these
   unless Step 4.5 sends you here.** Setting them now buys nothing and pulls
-  you toward installing an engine the user's books may never need; note also
-  that this repo does not yet ship a `surya_adapter.py` (issue #4)
+  you toward installing an engine the user's books may never need.
+  `SURYA_ADAPTER` points at `converter/surya_adapter.py`, which ships in this
+  repo; `SURYA_VENV_PY` points at a *separate* venv's interpreter, since the
+  OCR stack must not share dependencies with the converter
 - Optional semantic search: `INDEXER_SCRIPT` + `VAULT_SEARCH_DIR`
 - Figure output/cache locations: env-driven constants documented at the top
   of `figures/figure_qc_gate.py` (default `./output/figures`, inside the
@@ -141,9 +143,9 @@ state.
 mostly empty.** If the markdown is readable, the pipeline is working as
 designed and there is nothing here for you to install. Installing an OCR
 engine "to be safe" is the single most expensive mistake you can make during
-setup: it pulls in a heavyweight ML stack, requires a component this repo
-does not yet ship (see issue #4), and has cost a user hours and tens of GB of
-RAM on a book that converted perfectly without it.
+setup: it pulls in a heavyweight ML stack plus a multi-GB model download, and
+has cost a user hours and tens of GB of RAM on a book that converted perfectly
+without it.
 
 Know where the OCR path actually lives before you reach for it:
 
@@ -169,6 +171,19 @@ including its "Choosing your hardware tier" table (CPU-only / Apple Silicon
 to the user's actual hardware before installing. On a CPU-only machine the
 honest answer is that scanned books are not locally OCR-able — say so rather
 than installing an engine that cannot finish a book.
+
+Then set up the engine. A reference adapter for **Surya 0.22.x** ships as
+`converter/surya_adapter.py`; [`docs/surya-adapter.md`](docs/surya-adapter.md)
+has the venv commands, the inference-server launch line **with the memory caps
+already in it**, and the interface contract if you would rather drop in a
+different engine. Read the memory-cap section before starting a server — the
+defaults size a KV cache far larger than the model itself, and that is what
+turned into a multi-tens-of-GB run for one user.
+
+```bash
+export SURYA_VENV_PY=/path/to/surya22-venv/bin/python   # Scripts/python.exe on Windows
+export SURYA_ADAPTER="$PWD/converter/surya_adapter.py"
+```
 
 Then re-run the affected book through `--batch-dir` — the only path that can
 route to OCR. `--force` is required: a book already converted in Step 4 is
