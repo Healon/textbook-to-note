@@ -10,6 +10,17 @@ loose semantic versioning.
 
 ## [Unreleased]
 
+### Fixed
+- **One dash definition, shared by both sides of the figure pipeline**
+  ([#10](https://github.com/drpwchen/textbook-to-note/issues/10)). #8 widened the converter's
+  figure/table reference detection to U+2010–U+2015 and U+2212, but the figure stage kept its own
+  narrower, hand-maintained copies (`qc_metrics._SEP`, `figure_qc_gate._DASHES`,
+  `figure_scanned._DASHES`) — so a book typeset in, say, non-breaking hyphens would get
+  `<!-- REF: ... -->` markers the caption matcher silently failed to consume. The canonical set
+  now lives in `shared/config.py` (`DASH_CHARS` / `SEP_CLASS`) and all four call sites import it;
+  the OCR-substitution neighbour checks inside `normalize_fig_id()` were widened with it. Existing
+  normalize/caption tests re-run: 242 pass / 0 fail / 5 skip, unchanged from baseline.
+
 ### Changed
 - **Three usage profiles replace the implicit all-or-nothing setup** (docs only). The repo reads
   as one pipeline you either adopt whole or not at all, but the parts stack cleanly:

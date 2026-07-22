@@ -55,6 +55,7 @@ from pathlib import Path
 # tool writes generated artifacts (crops, logs, caches) by default.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from shared.config import BOOKS_DIR as TEXTBOOK_MD_BASE
+from shared.config import DASH_CHARS
 try:
     from shared.config import OUTPUT_DIR
 except ImportError:
@@ -371,13 +372,14 @@ def extract_raw_candidates(pdf_path: str, page_idx: int) -> list[dict]:
     return out
 
 
-# Dash variants seen in figure captions across books: ASCII hyphen, figure dash,
-# en-dash, em-dash, horizontal bar. CAPTION_RE accepts any (with optional spaces);
-# normalize_fig_id folds them all (plus period) to a canonical dot-separated id so
-# '64-5' / '64–5' / '30 — 44' / '64.5' all compare equal. Root-cause fix for
-# en-dash misses that would otherwise force fallback (some books print figure
-# ranges with a real Unicode en-dash rather than a hyphen).
-_DASHES = "-‒–—―"
+# Dash variants seen in figure captions across books. CAPTION_RE accepts any
+# (with optional spaces); normalize_fig_id folds them all (plus period) to a
+# canonical dot-separated id so '64-5' / '64–5' / '30 — 44' / '64.5' all compare
+# equal. Root-cause fix for en-dash misses that would otherwise force fallback.
+# The set itself lives in shared/config.py so it stays in lockstep with the
+# converter's reference detection (#10).
+_DASHES = DASH_CHARS
+_DASH_DOT = _DASHES + "."  # dash variants or dot, for neighbour checks below
 # Captures: chapter digit(s) + dash/period + page-numeric portion + optional sub-letter.
 # The sub-letter is required to disambiguate multi-panel figures (e.g. Fig 4-1A
 # vs 4-1D on the same page). The numeric portion accepts OCR-mangled chars
@@ -407,15 +409,15 @@ def normalize_fig_id(raw: str) -> str:
     out = []
     for i, ch in enumerate(s):
         if ch in ("l", "I"):
-            prev_ok = out and (out[-1].isdigit() or out[-1] in "-.‒–—―")
-            next_ok = i + 1 < len(s) and (s[i + 1].isdigit() or s[i + 1] in "-.‒–—―")
+            prev_ok = out and (out[-1].isdigit() or out[-1] in _DASH_DOT)
+            next_ok = i + 1 < len(s) and (s[i + 1].isdigit() or s[i + 1] in _DASH_DOT)
             if prev_ok or next_ok:
                 out.append("1")
                 continue
-        if ch == "S" and out and (out[-1].isdigit() or out[-1] in "-.‒–—―"):
+        if ch == "S" and out and (out[-1].isdigit() or out[-1] in _DASH_DOT):
             out.append("5")
             continue
-        if ch == "O" and out and (out[-1].isdigit() or out[-1] in "-.‒–—―"):
+        if ch == "O" and out and (out[-1].isdigit() or out[-1] in _DASH_DOT):
             out.append("0")
             continue
         out.append(ch)

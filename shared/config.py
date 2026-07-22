@@ -25,6 +25,16 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# Canonical dash set for figure/table reference IDs ("Figure 33–3", "TABLE 5‑2").
+# Publishers typeset these with whichever dash their house style uses, so the
+# converter's reference detection and the figure stage's caption matching must
+# agree on the same set (issue #10): ASCII hyphen, U+2010 hyphen, U+2011
+# non-breaking hyphen, U+2012 figure dash, U+2013 en dash, U+2014 em dash,
+# U+2015 horizontal bar, U+2212 minus.
+DASH_CHARS = "-‐‑‒–—―−"
+# Regex character class matching any of those dashes or a dot ("Figure 32.1").
+SEP_CLASS = "[" + DASH_CHARS + ".]"
+
 BOOKS_DIR = Path(os.environ.get("BOOKS_DIR") or (REPO_ROOT / "books"))
 OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR") or (REPO_ROOT / "output"))
 

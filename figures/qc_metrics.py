@@ -13,8 +13,12 @@ Any signal red-flagging → red verdict + diagnostic_dump showing 3 missed
 pages so a human can read the format and write the per-book fix.
 """
 import re
+import sys
 from collections import Counter
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from shared.config import DASH_CHARS, SEP_CLASS
 
 
 # Verdict thresholds (tunable from playbook insights)
@@ -36,8 +40,9 @@ YELLOW_IMG_PAGE_COVERAGE_MIN = 0.35
 EXTRACT_FLOOR_LOWFIG = 5
 MIN_IMG_PAGES_TO_CARE = 30
 
-# Separator class — same as extract_figures.py
-_SEP = r"[\-\.–—]"
+# Separator class — canonical definition in shared/config.py, same set the
+# converter's FIG_TABLE_PATTERNS uses, so REF markers it emits always match here (#10).
+_SEP = SEP_CLASS
 _MD_FIG_RE = re.compile(rf"\bFig(?:ure)?\.?\s+(\d+{_SEP}\d+)", re.I)
 _MD_REF_TAG_RE = re.compile(rf"<!--\s*REF:\s*Fig(?:ure)?\.?\s*(\d+{_SEP}\d+)", re.I)
 # Liberal line-start figure marker — many variants seen in textbooks:
@@ -53,9 +58,12 @@ _PDF_TBL_LINE_RE = re.compile(
 )
 
 
+_NORM_RE = re.compile("[" + re.escape(DASH_CHARS) + r"\.]")
+
+
 def _norm_fig_id(s: str) -> str:
-    """Normalize fig_id for cross-source comparison (en-dash → hyphen, dot → hyphen)."""
-    return re.sub(r"[–—\.]", "-", s).strip("-")
+    """Normalize fig_id for cross-source comparison (any dash variant or dot → hyphen)."""
+    return _NORM_RE.sub("-", s).strip("-")
 
 
 def parse_chapter_md_refs(md_dir: Path) -> set:

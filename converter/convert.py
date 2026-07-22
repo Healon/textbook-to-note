@@ -33,7 +33,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from shared.config import BOOKS_DIR, OUTPUT_DIR, SURYA_VENV_PY, SURYA_ADAPTER, SKIP_FOLDERS
+from shared.config import BOOKS_DIR, OUTPUT_DIR, SURYA_VENV_PY, SURYA_ADAPTER, SKIP_FOLDERS, SEP_CLASS
 
 # Out-of-band table-review trigger (T2N_REVIEW_QUEUE=1). Pure-stdlib (os/re), always importable.
 from review_queue import review_queue_enabled, review_reasons, format_review_marker
@@ -120,7 +120,8 @@ def clean_text(text: str) -> str:
 # Publishers typeset figure numbers with whichever dash their house style uses. Katzung 16e
 # uses en dashes throughout ("Figure 33–3"): 717 en dashes vs 8 ASCII hyphens, so matching
 # only [-.] found 14 of them and left figure extraction blind for the whole book.
-SEP = r'[-‐‑‒–—―−.]'
+# The set itself lives in shared/config.py so the figure stage matches the same dashes (#10).
+SEP = SEP_CLASS
 FIG_TABLE_PATTERNS = [
     # English patterns
     rf'(?:Fig(?:ure)?\.?\s*\d+{SEP}\d+[A-Za-z]*(?:\s*(?:and|to|,)\s*[A-Za-z])?)',

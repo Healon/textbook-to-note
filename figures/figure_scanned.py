@@ -30,14 +30,20 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from shared.config import DASH_CHARS
+
 POLICY_VERSION = "1.2"
 
-# Caption regex — handles dash variants + lowercase 'l' that OCR mangled '1' as
-_DASHES = "-‒–—―"
+# Caption regex — handles dash variants + lowercase 'l' that OCR mangled '1' as.
+# Dash set is the canonical one in shared/config.py (#10).
+_DASHES = DASH_CHARS
+_DASH_DOT = _DASHES + "."
 CAPTION_RE = re.compile(
     r"\s*(?:FIG(?:URE)?\.?|Figure|Fig\.?)\s*"
     r"(\d+\s*[" + _DASHES + r"\.]\s*[lISO\d]+[A-Za-z]?)",
@@ -72,18 +78,18 @@ def _ocr_class_a_normalize(raw: str) -> str:
         if ch in ("l", "I"):
             # Substitute to '1' if neighbours are digits or separators (the
             # OCR confusion only happens inside the numeric id)
-            if i + 1 < len(s) and (s[i+1].isdigit() or s[i+1] in "-.–—"):
+            if i + 1 < len(s) and (s[i+1].isdigit() or s[i+1] in _DASH_DOT):
                 out.append("1")
                 continue
-            if out and (out[-1].isdigit() or out[-1] in "-.–—"):
+            if out and (out[-1].isdigit() or out[-1] in _DASH_DOT):
                 out.append("1")
                 continue
         if ch == "S":
-            if out and (out[-1].isdigit() or out[-1] in "-.–—"):
+            if out and (out[-1].isdigit() or out[-1] in _DASH_DOT):
                 out.append("5")
                 continue
         if ch == "O":
-            if out and (out[-1].isdigit() or out[-1] in "-.–—"):
+            if out and (out[-1].isdigit() or out[-1] in _DASH_DOT):
                 out.append("0")
                 continue
         out.append(ch)
