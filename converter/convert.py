@@ -781,6 +781,36 @@ def render_page_text(page, page_num: int) -> tuple[str, int]:
     return annotate_fig_refs(page_text, page_num)
 
 
+def _release_plumber_page(page) -> None:
+    """Drop a pdfplumber Page's cached geometry as soon as the table pass is done with it (#5).
+
+    `PDF.pages` materializes every accessed page into a list held for the lifetime of the PDF
+    object, and each `Page` caches its own `chars` / `edges` / `rects` / textmap the first time
+    a table call touches them. Nothing released them before `PDF.close()` at the end of the
+    book, so peak memory grew roughly linearly with the number of table-bearing pages -- on a
+    table-dense reference that is tens of thousands of char dicts per page.
+
+    Safe because every page is read EXACTLY ONCE: the non-merge path touches `plumber.pages[i]`
+    only at the single `extract_tables_md()` call site, the merge path only at the single
+    `_gather_page_tables()` call site, and both of those return plain values (markdown strings,
+    row lists, floats) with no lazy reference back into the page. Nothing revisits a page later,
+    so this cannot change output -- and if something ever did revisit one, pdfplumber would
+    simply re-parse it, at a speed cost rather than a correctness cost.
+
+    `flush_cache()` / `close()` have been on `Page` for many pdfplumber releases (verified on
+    0.11.9), but they are reached defensively so an older pin degrades to the previous
+    behaviour instead of raising.
+    """
+    for name in ("flush_cache", "close"):
+        fn = getattr(page, name, None)
+        if fn is None:
+            continue  # older pdfplumber without the cache API -- nothing to release
+        try:
+            fn()
+        except Exception:
+            pass  # releasing a cache must never be able to fail a conversion
+
+
 def convert_pdf(pdf_path: str, out_path: str, book_label: str, table_worker=None) -> dict:
     """Convert a single PDF to markdown. Returns stats dict.
 
@@ -886,7 +916,11 @@ def convert_pdf(pdf_path: str, out_path: str, book_label: str, table_worker=None
                         # Either Docling is off, or it found nothing here. pdfplumber still gets
                         # its turn: it catches borderless cases Docling misses, and its own
                         # collapse modes remain guarded by page_frame_reject_reason().
-                        plain, rejects = extract_tables_md(plumber.pages[i])
+                        _pp = plumber.pages[i]
+                        try:
+                            plain, rejects = extract_tables_md(_pp)
+                        finally:
+                            _release_plumber_page(_pp)
                         md_tables = [(m, []) for m in plain]
             except Exception as e:
                 # Count, don't swallow. A single unparseable page and a wholly unopenable book used
@@ -932,7 +966,11 @@ def convert_pdf(pdf_path: str, out_path: str, book_label: str, table_worker=None
             tbls, rejects = [], []
             try:
                 if not (table_gate_on and not page_has_table_candidate(doc[i], page_text)):
-                    tbls, rejects = _gather_page_tables(plumber.pages[i], doc[i], i + 1)
+                    _pp = plumber.pages[i]
+                    try:
+                        tbls, rejects = _gather_page_tables(_pp, doc[i], i + 1)
+                    finally:
+                        _release_plumber_page(_pp)
             except Exception as e:
                 page_errors.append((i + 1, type(e).__name__, str(e)[:200]))
             page_tables.append(tbls)

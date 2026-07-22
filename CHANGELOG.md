@@ -10,6 +10,22 @@ loose semantic versioning.
 
 ## [Unreleased]
 
+### Fixed
+- **pdfplumber page cache is released after each page** ([#5](https://github.com/drpwchen/textbook-to-note/issues/5)).
+  `convert_pdf()` opened one `pdfplumber.PDF` for a whole book and reached into `plumber.pages[i]`
+  per page. `PDF.pages` holds every materialized `Page` for the object's lifetime, and each `Page`
+  caches its `chars` / `edges` / `rects` on first use, so peak memory grew roughly linearly with the
+  number of pages the table gate let through — nothing released them until `close()` at the end of
+  the book. Every page is read exactly once, so `flush_cache()` + `close()` after its single use
+  cannot change output, and **byte-identity was verified** on two books (a 1297-page table-dense
+  reference, 627 tables, and a 638-page ordinary one): 23/23 output files identical each, before
+  and after. Measured peak RSS: **6899 MB → 803 MB** on the dense book (8.6x), **6209 MB → 133 MB**
+  on the ordinary one (46.6x), and the curve flattens instead of climbing to the last page.
+  The ordinary book is the more interesting number: the issue predicted table-sparse books would
+  barely leak because the gate skips them, but the gate admits far more pages than actually yield
+  tables (638 pages, 12 tables extracted, still 6.2 GB), so the leak was never confined to
+  table-dense books.
+
 ### Changed
 - **Setup guide no longer provisions OCR up front** (`AGENTS.md`, [#3](https://github.com/drpwchen/textbook-to-note/issues/3)).
   Step 1 asked whether the user had a GPU and pointed at the OCR ladder before a single page had
