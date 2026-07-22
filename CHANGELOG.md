@@ -11,6 +11,20 @@ loose semantic versioning.
 ## [Unreleased]
 
 ### Fixed
+- **Docling degraded-book warning no longer cries wolf on every book after one failure.** The
+  warning tested the worker's `last_error` for truthiness, but that field is sticky by design (the
+  *last* error, never cleared on success) — with a shared warm worker, a single page timeout in book
+  61 of a 154-book run flagged the next 62 books as degraded. The worker now keeps a cumulative
+  `failure_count` and the book-level check compares a before/after snapshot, so the warning names
+  the number of pages *this* book actually lost to fallback.
+- **A PDF whose page tree pdfminer refuses is repaired instead of silently losing every table.**
+  pdfplumber's parser is stricter than MuPDF about damaged page trees / xref, and returns zero
+  pages where fitz reads the book fine — which costs 100% of the book's tables while the prose
+  converts normally (two references of 464 and 752 pages hit this in a corpus run). When
+  pdfplumber parses 0 pages but fitz sees a full book, the PDF is rewritten through fitz
+  (`garbage=4, clean=True`) to a temp copy and the table pass retried on that; the repair is
+  reported in the book's warnings either way. Both fixes were proven in a 154-book production
+  run before landing here.
 - **One dash definition, shared by both sides of the figure pipeline**
   ([#10](https://github.com/drpwchen/textbook-to-note/issues/10)). #8 widened the converter's
   figure/table reference detection to U+2010–U+2015 and U+2212, but the figure stage kept its own

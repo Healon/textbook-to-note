@@ -29,6 +29,7 @@ import time
 import argparse
 import json
 import subprocess
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -858,8 +859,29 @@ def convert_pdf(pdf_path: str, out_path: str, book_label: str, table_worker=None
     single-PDF invocation passes None and gets a private worker (paying the cold start once,
     which is fine for one book)."""
     doc = fitz.open(pdf_path)
-    plumber = pdfplumber.open(pdf_path)
     total_pages = len(doc)
+    plumber = pdfplumber.open(pdf_path)
+    plumber_repair_note = None
+    if len(plumber.pages) == 0 and total_pages > 0:
+        # pdfminer (pdfplumber's parser) is stricter than MuPDF about a damaged page tree / xref,
+        # and returns ZERO pages where fitz reads the book fine. Silently, that costs every table
+        # in the book (2026-07-21 batch: two references of 464 and 752 pages both lost 100% of
+        # their tables this way). Rewriting the PDF through fitz normalizes the structure and
+        # pdfminer then parses it.
+        try:
+            repaired = Path(tempfile.gettempdir()) / f"t2n_repair_{os.getpid()}_{Path(pdf_path).stem[:40]}.pdf"
+            doc.save(str(repaired), garbage=4, clean=True, deflate=True)
+            retry = pdfplumber.open(str(repaired))
+            if len(retry.pages) > 0:
+                plumber.close()
+                plumber = retry
+                plumber_repair_note = (
+                    f"pdfplumber parsed 0 pages from the original PDF; a fitz-normalized rewrite "
+                    f"parsed {len(retry.pages)} — the table pass ran on the repaired copy")
+            else:
+                retry.close()
+        except Exception as e:
+            plumber_repair_note = f"pdfplumber parsed 0 pages and the fitz repair attempt failed: {e}"
 
     output = [f"# {book_label}\n"]
     output.append(f"Source: `{pdf_path}`\n")
@@ -903,6 +925,13 @@ def convert_pdf(pdf_path: str, out_path: str, book_label: str, table_worker=None
         elif table_worker is None:
             table_worker = DoclingTableWorker()
             owns_worker = True
+
+    # Snapshot the worker's lifetime failure counter so the book-level warning below can report
+    # failures THIS BOOK caused, rather than any failure the shared worker ever had (a shared
+    # worker outlives the book on purpose — see the batch callers).
+    docling_failures_at_start = (
+        table_worker.status().get("failure_count", 0)
+        if (docling_on and table_worker is not None) else 0)
 
     total_docling_tables = 0
     total_flagged = 0
@@ -1050,13 +1079,21 @@ def convert_pdf(pdf_path: str, out_path: str, book_label: str, table_worker=None
     warnings_out = []
     if docling_note:
         warnings_out.append(docling_note)
-    if docling_status and (docling_status.get("disabled") or docling_status.get("last_error")):
-        # A Docling worker that died or was disabled mid-book is not a silent event: the book's
-        # tables after that point came from pdfplumber, which is a different quality baseline.
+    if plumber_repair_note:
+        warnings_out.append(plumber_repair_note)
+    docling_failures_this_book = (
+        docling_status.get("failure_count", 0) - docling_failures_at_start) if docling_status else 0
+    if docling_status and (docling_status.get("disabled") or docling_failures_this_book > 0):
+        # A Docling worker that died or was disabled mid-book is not a silent event: the failed
+        # pages fell back to pdfplumber, a different quality baseline. Count the failures this book
+        # actually caused — testing `last_error` for truthiness cannot do that, because it is sticky
+        # across the whole life of a shared worker (a single timeout in book 61 of a 154-book run
+        # flagged the next 62 books as degraded before this was a delta).
         warnings_out.append(
-            f"Docling worker degraded during this book (disabled={docling_status.get('disabled')}, "
+            f"Docling worker failed on {docling_failures_this_book} page(s) of this book "
+            f"(disabled={docling_status.get('disabled')}, "
             f"restarts={docling_status.get('consecutive_restarts')}, "
-            f"last_error={docling_status.get('last_error')}) — affected pages fell back to pdfplumber")
+            f"last_error={docling_status.get('last_error')}) — those pages fell back to pdfplumber")
     if detect_on:
         if plumber_pages == 0 and total_pages > 0:
             warnings_out.append(

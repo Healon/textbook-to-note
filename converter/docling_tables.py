@@ -212,6 +212,12 @@ class DoclingTableWorker:
         self._consecutive_restarts = 0
         self._disabled = False
         self.last_error: str | None = None
+        # Cumulative count of pages this worker failed to answer for, across its whole lifetime.
+        # `last_error` is sticky by design (it is the LAST error, never cleared on success), so a
+        # book-level "was this book affected?" check must compare this counter before and after the
+        # book -- not test `last_error` for truthiness. Doing the latter made a single timeout in
+        # book 61 flag the next 62 books as degraded in the 2026-07-21 batch-1 run.
+        self.failure_count = 0
 
     # -- context manager --------------------------------------------------------------------
     def __enter__(self) -> "DoclingTableWorker":
@@ -274,6 +280,7 @@ class DoclingTableWorker:
                 # Reset the restart counter (it proved it's healthy) and just report no tables.
                 self._consecutive_restarts = 0
                 self.last_error = resp.get("error")
+                self.failure_count += 1
                 return []
 
             self._consecutive_restarts = 0
@@ -281,6 +288,7 @@ class DoclingTableWorker:
                 return [DoclingTable.from_dict(t) for t in resp.get("tables", [])]
             except Exception as e:
                 self.last_error = f"malformed table payload: {e}"
+                self.failure_count += 1
                 return []
 
     def status(self) -> dict:
@@ -289,6 +297,7 @@ class DoclingTableWorker:
             "running": self._proc is not None and self._proc.poll() is None,
             "disabled": self._disabled,
             "consecutive_restarts": self._consecutive_restarts,
+            "failure_count": self.failure_count,
             "last_error": self.last_error,
             "stderr_tail": list(self._stderr_tail),
         }
@@ -377,6 +386,7 @@ class DoclingTableWorker:
 
     def _handle_failure(self, err: _WorkerError) -> None:
         self.last_error = str(err)
+        self.failure_count += 1
         self._kill()
         self._consecutive_restarts += 1
         if self._consecutive_restarts > self.max_consecutive_restarts:
