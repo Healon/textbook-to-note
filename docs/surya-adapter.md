@@ -185,9 +185,26 @@ render at 300 DPI downscaled to 2048 px, run end to end through
 Two things this run establishes and one it does not. It establishes that the contract works
 end to end (page alignment, bbox-driven column order, the QC counters) and that a capped
 server stays around 3 GB rather than tens of GB. It does **not** establish GPU throughput —
-that number is hardware-dependent and was not measured here. Do not read 0.01 pages/s as
-"Surya is slow"; read it as "CPU is not a route for whole books", which is what the
-hardware-tier table in [`ocr-ladder.md`](ocr-ladder.md) already says.
+see the GPU run below for that. Do not read 0.01 pages/s as "Surya is slow"; read it as
+"CPU is not a route for whole books", which is what the hardware-tier table in
+[`ocr-ladder.md`](ocr-ladder.md) already says.
+
+### The same smoke on GPU
+
+Same machine, same 5-page book, `llama-server -ngl 99 --parallel 2 --ctx-size 24576`
+on an RTX 3070 Ti (8 GB), adapter attached via `SURYA_INFERENCE_URL`:
+
+| | |
+|---|---|
+| Wall clock | 33.3 s for 5 pages ⇒ **~0.15 pages/s** end to end (includes adapter startup + server attach) |
+| GPU memory | whole-card peak **3635 MB**, of which ~1.3 GB was an unrelated concurrent job ⇒ the capped server fits in **~2.3 GB** VRAM |
+| Output | byte count and QC counters identical to the CPU run; two-column ordering check passed programmatically |
+
+Caveats to carry with these numbers: n = 5 pages of a synthetic book, measured once, on a
+card that was also hosting another process — treat 0.15 pg/s as an order-of-magnitude
+anchor (whole-book throughput will differ; per-call adapter startup amortizes over larger
+batches), not a benchmark. The VRAM number is the useful one: with the documented caps,
+an 8 GB card runs the server with room to spare.
 
 A caveat about the two-column check, because it changes how you build a test page: Surya's
 layout stage segments columns from *visual* density. A synthetic page with six widely spaced
