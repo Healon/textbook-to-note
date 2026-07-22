@@ -12,6 +12,20 @@
 
 *左：[`templates/`](templates/) 裡的其中一份模板。右：我 vault 裡照著它寫出來的真實筆記——每條主張都追得到出處，每個段落都在我預期的位置。*
 
+## 你要走哪一條線？
+
+不是每個人都需要整套 pipeline，而且這些零件是往同一個方向疊上去的——下面每一條線都等於「上一條線 + 再多一件事」。挑能解決你問題的最小那條就好，之後要往上加不用重做。
+
+| 路線 | 你會得到什麼 | 要裝什麼 |
+|---|---|---|
+| **A · 只要轉檔** | 你的 PDF/EPUB 變成乾淨、可 grep 的 markdown，含頁碼標記、表格、圖表引用標記。用 `grep` 搜。 | `pip install -r requirements.txt`，然後跑 `converter/convert.py`。就這樣——不用 GPU、不用 ollama、不用索引。 |
+| **B · A ＋ 筆記工作流** | 讓 AI 從這個語料庫寫出結構化、逐條引用的筆記，圖片經 QC gate 抽出。 | A，再加 [`skills/`](skills/) 兩個 skill 與 [`workflows/note-writing.md`](workflows/note-writing.md)。 |
+| **C · B ＋ 語意搜尋** | 跨書用「意思」而不是關鍵字檢索——當你開始想不起來「那段在哪一本」時才值得做。 | B，再加一個索引器：姊妹專案 [vault-search](https://github.com/drpwchen/vault-search)、本機 embedding 模型、設好 `INDEXER_SCRIPT`。 |
+
+**這個 repo 不含索引器**：路線 C 的語意搜尋來自 vault-search（或任何實作同一組 `--incremental` / `--book <name>` CLI 的索引器），`post_convert.py --index` 只是呼叫它的掛勾。路線 A 是完整支援的終點，不是次級選項——幾十本書的規模，直接 grep 轉好的 markdown 真的就夠了。
+
+如果你是叫 AI 幫你裝，直接告訴它你要哪一條線；[`AGENTS.md`](AGENTS.md) 第一件事就是問這個，然後跳過你這條線用不到的步驟。
+
 ## 為什麼這件事很難（以及為什麼直覺做法會失敗）
 
 把原始 PDF 丟給大模型看似簡單，直到你撞上真正的問題：

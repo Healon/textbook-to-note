@@ -17,7 +17,8 @@ converter/    — PDF/EPUB → markdown conversion (0 LLM tokens)
 figures/      — on-demand figure extraction with QC gating
 skills/       — two Claude Code skill definitions (drop-in to ~/.claude/skills/)
 workflows/    — the note-writing workflow specification
-templates/    — real production note templates (zh-TW + English) for Step 1.1's topic-type table
+templates/    — real production note templates (zh-TW + English) for the topic-type
+                table in workflows/note-writing.md Step 1.1 (profiles B/C)
 docs/         — architecture + OCR-ladder reference docs
 examples/     — one example output note showing the target format
 shared/       — shared config (paths, env var names)
@@ -28,16 +29,39 @@ Read `docs/architecture.md` first for the full picture. Leave
 `docs/ocr-ladder.md` alone until Step 4.5 tells you to open it — it is a
 reference for a failure case most users never hit, not part of setup.
 
-## Step 1: Understand the user's situation
+## Step 1: Which profile is the user setting up?
+
+**Ask this before anything else**, and do not start installing until you have
+an answer. The profiles stack — each is the one above it plus one more thing —
+and the wrong assumption here costs the user an install they never needed.
+
+| Profile | The user wants | Steps you run |
+|---|---|---|
+| **A · Converter only** | Their books as clean, greppable markdown. `grep` is their whole search story. | 1.1 → 2 → 3 → 4 (→ 4.5 only if output is broken). **Then stop.** |
+| **B · A + note workflow** | An AI writing structured, cited notes from that corpus, with figures. | A's steps, then 6 → 7 → 8. |
+| **C · B + semantic search** | Cross-book retrieval by meaning, not keyword. | B's steps, plus 5. |
+
+If the user doesn't know, **default to A** and say why: it is a complete,
+supported end state, it installs in one command, and B and C can be added
+later without redoing any conversion. Profile A also means Step 5 (indexing),
+Step 6 (skills) and Step 7 (note workflow) are simply not yours to run — do
+not "set them up anyway to be helpful", and do not install ollama or an
+embedding model for a profile-A user.
+
+State the chosen profile back to the user in one line before you continue, so
+a wrong guess gets corrected now rather than three installs later.
+
+### Step 1.1: Understand the user's situation
 
 Ask, or infer from context:
 - Where do their textbook PDFs/EPUBs already live? (a folder, a cloud-synced
   drive, etc.)
-- What notes tool do they use, and where is their vault/notes folder?
-- Do they want the optional semantic search index (LanceDB + a local
-  embedding model via ollama), or is grep-only fine for their corpus size?
-  Semantic search pays off once there are more than a handful of books;
-  for a small personal library, skip it initially and add later.
+- **Profiles B/C only** — what notes tool do they use, and where is their
+  vault/notes folder? A profile-A user has no vault in this pipeline; the
+  converted markdown is the deliverable.
+- **Profile C only** — the semantic search index (LanceDB + a local embedding
+  model via ollama). Semantic search pays off once there are more than a
+  handful of books; for a small personal library, A or B first and add it later.
   **This repo ships no indexer.** `post_convert.py --index` only shells out
   to whatever `INDEXER_SCRIPT` points at, and prints `[skip]` when it is
   unset. To actually get semantic search, point `INDEXER_SCRIPT` at the
@@ -66,7 +90,7 @@ installable lines:
   check with `pandoc --version` and prompt the user to install it if missing
 - `requests` — only for `scan_fix_negatives.py --verify-dark` (ollama vision)
 - `lancedb` — only for `post_convert.py`'s index-coverage audit, and it is
-  useless on its own without an external indexer (see Step 1 / Step 5)
+  useless on its own without an external indexer (see Step 1.1 / Step 5)
 - OCR (Surya) lives in its own venv entirely — see Step 4.5
 
 So `pip install -r requirements.txt` alone never gives the user semantic
@@ -201,9 +225,9 @@ worthless (OCR-overlay scans, some digitized reprints). It forces OCR on
 every PDF under that directory, so point `--batch-dir` at a folder holding
 just the affected book.
 
-## Step 5: (Optional) Build the semantic index
+## Step 5: (Profile C only) Build the semantic index
 
-Only if the user opted in during Step 1:
+Skip this step entirely for profiles A and B:
 
 ```bash
 python converter/post_convert.py --index
@@ -228,7 +252,7 @@ telling the user it's ready. If the user does not want any of this, say
 plainly that grep over `<OUTPUT_DIR>/` is the whole search story — that is a
 supported configuration, not a degraded one.
 
-## Step 6: Install the two Claude Code skills
+## Step 6: (Profiles B/C) Install the two Claude Code skills
 
 ```bash
 mkdir -p ~/.claude/skills
@@ -243,7 +267,7 @@ only the `SKILL.md` files move. Open each copied `SKILL.md` and replace every
 `C:\Users\you\textbook-to-note` or `/home/you/textbook-to-note`), so the
 example commands resolve to the actual `converter/` and `figures/` code.
 
-## Step 7: Run the note-writing workflow
+## Step 7: (Profiles B/C) Run the note-writing workflow
 
 `workflows/note-writing.md` is the full specification for turning a
 converted textbook chapter into a structured note. It is written generically
@@ -268,7 +292,7 @@ Then, for a real topic:
    deconstruct-and-reslot approach — do not just append new content to old
 5. Optionally run Phase 5 link suggestion
 
-## Step 8: Verify the note-format hook (optional but recommended)
+## Step 8: (Profiles B/C, optional but recommended) Verify the note-format hook
 
 If you (the agent) or the user want a mechanical pre-flight check before
 every note write — catching missing citations, unescaped table syntax,

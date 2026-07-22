@@ -10,6 +10,17 @@ loose semantic versioning.
 
 ## [Unreleased]
 
+### Changed
+- **Three usage profiles replace the implicit all-or-nothing setup** (docs only). The repo reads
+  as one pipeline you either adopt whole or not at all, but the parts stack cleanly:
+  **A** converter-only (markdown + `grep`), **B** A plus the note workflow and figures,
+  **C** B plus semantic search via the companion
+  [vault-search](https://github.com/drpwchen/vault-search) indexer. Both READMEs open with the
+  table, and `AGENTS.md` now asks which profile *first* — before any install — and marks every
+  later step with the profiles it belongs to. The failure this prevents is an agent helpfully
+  installing ollama, an embedding model, and the skills for a user who only ever wanted greppable
+  markdown; the same over-eagerness that made the OCR path in 0.3.0 expensive.
+
 ## [0.3.0] — 2026-07-22 — The OCR rung, and telling the truth in the docs
 
 Where 0.2.0 was about table fidelity, this one is about the two places the project was

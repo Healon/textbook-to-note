@@ -12,6 +12,26 @@ I've loved taking notes since med school, and over the years I've built up thous
 
 *Left: one of the templates in [`templates/`](templates/). Right: a real note in my vault, written against it — every claim traceable, every section where I expect it.*
 
+## Which path are you on?
+
+Not everyone wants the whole pipeline, and the parts stack in one direction — each profile
+below is the one above it plus one more thing. Pick the smallest one that solves your
+problem; you can move up later without redoing anything.
+
+| Profile | What you get | What you set up |
+|---|---|---|
+| **A · Converter only** | Your PDFs/EPUBs as clean, greppable markdown with page markers, tables, and figure-reference markers. Search with `grep`. | `pip install -r requirements.txt`, then `converter/convert.py`. Nothing else — no GPU, no ollama, no index. |
+| **B · A + the note workflow** | An AI writes structured, per-claim-cited notes from that corpus, with figures extracted through a QC gate. | A, plus the two skills in [`skills/`](skills/) and [`workflows/note-writing.md`](workflows/note-writing.md). |
+| **C · B + semantic search** | Cross-book retrieval by meaning rather than keyword — worth it once "which book was that in?" stops being obvious. | B, plus an indexer: the companion repo [vault-search](https://github.com/drpwchen/vault-search), a local embedding model, and `INDEXER_SCRIPT`. |
+
+**This repo ships no indexer.** Profile C's semantic search comes from vault-search (or any
+indexer exposing the same `--incremental` / `--book <name>` CLI); `post_convert.py --index`
+is only the hook that calls it. Profile A is a fully supported end state, not a degraded one —
+for a few dozen books, grep over the converted markdown is genuinely enough.
+
+If you're having an AI set this up, tell it which profile you want; [`AGENTS.md`](AGENTS.md)
+asks this first and then skips the steps your profile doesn't need.
+
 ## Why this is hard (and why naive approaches fail)
 
 Feeding a raw PDF to a frontier model seems simple until you hit the real problems:
