@@ -24,8 +24,9 @@ shared/       — shared config (paths, env var names)
 requirements.txt
 ```
 
-Read `docs/architecture.md` first for the full picture, and
-`docs/ocr-ladder.md` if you'll be doing any OCR-heavy conversions.
+Read `docs/architecture.md` first for the full picture. Leave
+`docs/ocr-ladder.md` alone until Step 4.5 tells you to open it — it is a
+reference for a failure case most users never hit, not part of setup.
 
 ## Step 1: Understand the user's situation
 
@@ -37,12 +38,11 @@ Ask, or infer from context:
   embedding model via ollama), or is grep-only fine for their corpus size?
   Semantic search pays off once there are more than a handful of books;
   for a small personal library, skip it initially and add later.
-- Do they have a GPU available locally? This affects whether the OCR ladder
-  (`docs/ocr-ladder.md`) can use a GPU-accelerated engine or should fall
-  back to CPU-only options. See "Choosing your hardware tier" in
-  `docs/ocr-ladder.md` for the tier table (CPU-only / Apple Silicon 8GB /
-  Apple Silicon 16GB+ / NVIDIA 8GB / NVIDIA 16GB+) before recommending any
-  OCR/vision-QC/embedding stack.
+
+**Do not ask about GPUs here, and do not install any OCR engine yet.** OCR is
+a reactive exception path in this pipeline, not a prerequisite — see Step 4.5.
+Born-digital PDFs (bought ebooks, publisher downloads — the common case) go
+through `fitz` alone and never touch it.
 
 ## Step 2: Install dependencies
 
@@ -67,8 +67,10 @@ don't fit:
 - `OUTPUT_DIR` — where converted markdown goes (default `./output`; keep it
   outside the notes vault — this corpus is for your reference, not for the
   user to read directly)
-- Optional OCR fallback: `SURYA_VENV_PY` + `SURYA_ADAPTER` (see
-  `docs/ocr-ladder.md`)
+- Optional OCR fallback: `SURYA_VENV_PY` + `SURYA_ADAPTER` — **skip these
+  unless Step 4.5 sends you here.** Setting them now buys nothing and pulls
+  you toward installing an engine the user's books may never need; note also
+  that this repo does not yet ship a `surya_adapter.py` (issue #4)
 - Optional semantic search: `INDEXER_SCRIPT` + `VAULT_SEARCH_DIR`
 - Figure output/cache locations: env-driven constants documented at the top
   of `figures/figure_qc_gate.py` (default `./output/figures`, inside the
@@ -103,12 +105,6 @@ QC gate and reads as clean, citable data. The flag marks the high-risk subset
 pass. Before citing any flagged table as data, verify it against the PDF (or
 run the review pass). See [`docs/table-review.md`](docs/table-review.md).
 
-If the text looks garbled or mostly empty, read `docs/ocr-ladder.md` and
-re-run with the OCR-forcing flag (`--force-surya`, requires the optional
-OCR engine from `docs/ocr-ladder.md`) rather than assuming the conversion is
-broken — most garbled output on a first try is a silent fitz failure that
-the OCR ladder is built to catch.
-
 Once the smoke test looks right, convert the rest of the user's priority
 books:
 
@@ -121,6 +117,57 @@ report progress, don't block the conversation on it. Don't run two batch
 conversions against the same `OUTPUT_DIR` concurrently — progress tracking
 is last-writer-wins, so overlapping runs will corrupt each other's progress
 state.
+
+## Step 4.5: OCR — only if Step 4 actually came out wrong
+
+**Skip this entire step unless the Step 4 output is genuinely garbled or
+mostly empty.** If the markdown is readable, the pipeline is working as
+designed and there is nothing here for you to install. Installing an OCR
+engine "to be safe" is the single most expensive mistake you can make during
+setup: it pulls in a heavyweight ML stack, requires a component this repo
+does not yet ship (see issue #4), and has cost a user hours and tens of GB of
+RAM on a book that converted perfectly without it.
+
+Know where the OCR path actually lives before you reach for it:
+
+- Routing to OCR exists **only** in the `--batch-dir` code path
+  (`converter/convert.py`), where a PDF is sent to OCR if it is scan-only, if
+  a silent `fitz` failure is detected, or if you passed `--force-surya`.
+- The **single-file** path (`python converter/convert.py one.pdf`) never
+  invokes OCR at all. If a single-file conversion produced text, OCR was not
+  involved and installing an engine will change nothing.
+
+If the output really is broken, diagnose before installing anything:
+
+1. Open the PDF in a normal viewer and try to select text on a bad page. Text
+   selects cleanly ⇒ it is a born-digital file and the problem is not OCR.
+2. Garbled-but-present text usually means a broken font encoding (CID /
+   Identity-H without ToUnicode, PUA codepoints) — the silent-failure case
+   the OCR ladder exists to catch.
+3. No selectable text at all ⇒ a true scan, and OCR is the right answer.
+
+Only for cases 2 and 3, read [`docs/ocr-ladder.md`](docs/ocr-ladder.md),
+including its "Choosing your hardware tier" table (CPU-only / Apple Silicon
+8GB / Apple Silicon 16GB+ / NVIDIA 8GB / NVIDIA 16GB+), and size the engine
+to the user's actual hardware before installing. On a CPU-only machine the
+honest answer is that scanned books are not locally OCR-able — say so rather
+than installing an engine that cannot finish a book.
+
+Then re-run the affected book through `--batch-dir` — the only path that can
+route to OCR. `--force` is required: a book already converted in Step 4 is
+skipped both by the progress file and by the up-to-date `full_text.md` check,
+so without it the re-run is a no-op.
+
+```bash
+python converter/convert.py --batch-dir "path/to/folder/with/that/book" --force
+```
+
+Cases 2 and 3 are both auto-detected, so that command is usually enough. Add
+`--force-surya` only when auto-detection did *not* fire and the output is
+still bad — a text layer healthy enough to pass the check while being
+worthless (OCR-overlay scans, some digitized reprints). It forces OCR on
+every PDF under that directory, so point `--batch-dir` at a folder holding
+just the affected book.
 
 ## Step 5: (Optional) Build the semantic index
 

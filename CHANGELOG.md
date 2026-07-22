@@ -11,6 +11,15 @@ loose semantic versioning.
 ## [Unreleased]
 
 ### Changed
+- **Setup guide no longer provisions OCR up front** (`AGENTS.md`, [#3](https://github.com/drpwchen/textbook-to-note/issues/3)).
+  Step 1 asked whether the user had a GPU and pointed at the OCR ladder before a single page had
+  been converted, which reads to a coding agent as "install the OCR stack now." It is an exception
+  path: OCR routing exists only in the `--batch-dir` code path, and the single-file path never
+  invokes it at all. A first-time user's agent installed Surya, hit the missing adapter ([#4](https://github.com/drpwchen/textbook-to-note/issues/4)),
+  wrote its own against the removed `surya.ocr` API, chased that into a local VLM inference server,
+  and exhausted 48 GB of RAM — on a born-digital PDF that converted correctly with no OCR at all.
+  The GPU question is gone from Step 1 and OCR now lives in a new **Step 4.5**, entered only when
+  Step 4's output is actually garbled or empty, with a diagnose-before-installing checklist.
 - **Related-projects section now links [note-supplement](https://github.com/drpwchen/note-supplement)**
   (both README variants). It covers the direction this pipeline deliberately does not: merging new
   source material into notes that already exist, where the risk is not missing content but silently
