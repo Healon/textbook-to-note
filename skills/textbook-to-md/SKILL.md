@@ -61,7 +61,7 @@ python {REPO}/converter/convert.py --batch-dir "path/to/your/textbook/folder" --
 python {REPO}/converter/convert.py --batch-dir DIR --force --force-surya
 
 # EPUB → markdown (the 2nd arg is a FOLDER, not a .md file)
-python {REPO}/converter/convert.py "path/to/book.epub" "textbook-md/Author_Title_2e_2022"
+python {REPO}/converter/convert.py "path/to/book.epub" "<OUTPUT_DIR>/Author_Title_2e_2022"
 ```
 
 Batch mode skips files whose markdown already exists and is newer than the
@@ -83,7 +83,8 @@ up `.epub` files automatically.
   on-demand figure flow is PDF-only).
 
 ### Batch-dir features
-- Recursively finds all PDFs, auto-outputs to `textbook-md/{PDF_stem}/`
+- Recursively finds all PDFs, auto-outputs to `<OUTPUT_DIR>/{PDF_stem}/`
+  (`OUTPUT_DIR` from `shared/config.py`; default `./output`)
 - Produces `full_text.md` (complete with `<!-- page N -->` markers) plus a
   chapter split
 - **Chapter-splitting priority**: PDF bookmarks → pattern detection →
@@ -93,13 +94,14 @@ up `.epub` files automatically.
   triggers: (1) a page is scan-only (near-zero extractable characters); (2)
   fitz-silent-failure is detected (see `docs/ocr-ladder.md`). Falls back to
   skip-with-explanation if the OCR environment is missing. Output is
-  `full_text.md` with page markers; chapter split is not applied to OCR'd
-  books (no reliable heading detection on OCR text)
+  `full_text.md` with page markers, and a chapter split is *attempted* on the
+  OCR'd text too (numbered-heading patterns often survive OCR); it is
+  best-effort and simply yields no chapters when heading detection fails
 
 ## Output structure
 
 ```
-textbook-md/
+<OUTPUT_DIR>/                       ← default ./output (shared/config.py)
 ├── Author_Title_Edition_Year/
 │   ├── ch01_Chapter_Title.md      ← conversion produces md only
 │   ├── ch02_....md
@@ -137,7 +139,7 @@ Two search methods:
 
 ### 1. Keyword search (grep) — exact match, 0 tokens
 ```bash
-grep -r "your search term" textbook-md/
+grep -r "your search term" "$OUTPUT_DIR"      # default ./output
 ```
 
 ### 2. Semantic search (optional) — concept match
@@ -246,7 +248,11 @@ python {REPO}/figures/figure_remap.py extract \
   --page {1-indexed PDF page from the REF marker}
 ```
 
-Contract: `{status: pass|fail|escalate, match_method, hard_fail, file, fig_id, reason}`.
+Contract: `{status: pass|fail|escalate, match_quality: exact|uncertain|failed,
+hard_fail, file, fig_id, reason, qc_degraded, qc_skipped}` — those eight keys
+exactly (`figures/figure_remap.py` `CONTRACT_KEYS`; the validator raises on any
+extra or missing key, so branching on the engine's internal `match_method` is
+not just discouraged, it is impossible).
 `status:fail` (exit 1) is a deterministic miss — a correct refusal, not a
 wrong crop; fix `--page`, escalate to vision, or leave a `<!-- TODO -->`.
 Read the real caption to confirm the figure depicts what you intend.

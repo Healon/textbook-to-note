@@ -172,8 +172,14 @@ automatically.
 Contract returned (and ONLY this — never the gate's internal shape):
 ```json
 { "status": "pass|fail|escalate", "match_quality": "exact|uncertain|failed",
-  "hard_fail": true|false, "file": "<path|null>", "fig_id": "<normalized>", "reason": "<text>" }
+  "hard_fail": true|false, "file": "<path|null>", "fig_id": "<normalized>", "reason": "<text>",
+  "qc_degraded": true|false, "qc_skipped": ["<check name>", "..."] }
 ```
+Those eight keys, no more and no fewer — `_validate()` in
+`figures/figure_remap.py` raises on any extra or missing key.
+- `qc_degraded` / `qc_skipped`: some QC checks could not run (e.g. the source
+  page render was unavailable), so a `pass` here is weaker than a fully-gated
+  one. Treat a degraded pass as "embed, but eyeball it".
 - `match_quality`: `exact` = deterministic geometric match · `uncertain` = a
   fallback crop (only with `--no-strict`) · `failed` = no crop. ==Branch on
   this, never on the engine method.== The precise method is logged only in a
@@ -299,11 +305,13 @@ Behavior under strict mode:
   pick, vision-guided bbox, existing-file reuse, and size-based picks are
   skipped entirely.
 - If geometric_match cannot deterministically own a raster for the
-  normalized fig_id → **HARD_FAIL**: `{pass:false, hard_fail:true,
-  match_method:"FAIL", reason:...}`, exit `2`. It never substitutes a
-  different raster.
-- Every result carries `match_method` (`geometric_match` | `FAIL`) and
-  `fig_id_normalized`; the per-book QC log records a method counter.
+  normalized fig_id → **HARD_FAIL**, surfaced on the entrypoint contract as
+  `{"status":"fail", "match_quality":"failed", "hard_fail":true, "file":null,
+  "reason":...}` with exit `1`. It never substitutes a different raster.
+  (Exit `2` is `status:escalate`, which strict mode never returns.)
+- Internally the gate tracks a `match_method` (`geometric_match` | `FAIL`)
+  and the per-book QC log records a method counter — but that key is
+  deliberately *not* on the contract above; branch on `match_quality`.
 
 When strict HARD_FAILs, the caller decides: fix `--page`, or escalate to
 vision (read the page render → `--bbox`), or leave a `<!-- TODO -->`. A

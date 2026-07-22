@@ -38,6 +38,13 @@ Ask, or infer from context:
   embedding model via ollama), or is grep-only fine for their corpus size?
   Semantic search pays off once there are more than a handful of books;
   for a small personal library, skip it initially and add later.
+  **This repo ships no indexer.** `post_convert.py --index` only shells out
+  to whatever `INDEXER_SCRIPT` points at, and prints `[skip]` when it is
+  unset. To actually get semantic search, point `INDEXER_SCRIPT` at the
+  indexer from the companion repo
+  [vault-search](https://github.com/drpwchen/vault-search) (or any indexer
+  of your own with the same CLI: `<script> --incremental`, `<script>
+  --book <name>`). Grep works out of the box with no extra install.
 
 **Do not ask about GPUs here, and do not install any OCR engine yet.** OCR is
 a reactive exception path in this pipeline, not a prerequisite — see Step 4.5.
@@ -50,10 +57,20 @@ through `fitz` alone and never touch it.
 pip install -r requirements.txt
 ```
 
-`requirements.txt` covers PDF parsing, EPUB conversion (needs `pandoc` on
-`PATH` separately — check with `pandoc --version` and prompt the user to
-install it if missing), and the optional semantic-search stack. If the user
-declined semantic search in Step 1, you can skip installing that subset.
+`requirements.txt` covers **only** the core converter: PDF parsing, table
+extraction, and the image helpers. Everything else is a separate manual
+install, listed as comments at the bottom of the file rather than as
+installable lines:
+
+- EPUB conversion needs the `pandoc` CLI on `PATH` (not a pip package) —
+  check with `pandoc --version` and prompt the user to install it if missing
+- `requests` — only for `scan_fix_negatives.py --verify-dark` (ollama vision)
+- `lancedb` — only for `post_convert.py`'s index-coverage audit, and it is
+  useless on its own without an external indexer (see Step 1 / Step 5)
+- OCR (Surya) lives in its own venv entirely — see Step 4.5
+
+So `pip install -r requirements.txt` alone never gives the user semantic
+search; do not tell them otherwise.
 
 ## Step 3: Configure paths
 
@@ -177,10 +194,24 @@ Only if the user opted in during Step 1:
 python converter/post_convert.py --index
 ```
 
-Requires the local embedding model to be running (e.g. `ollama pull
-bge-m3` then `ollama serve`, or however their local inference server is
-set up). Verify the index actually returns results for a test query before
-telling the user it's ready.
+**This step is a hook, not an implementation.** `run_indexer()` runs the
+script at `INDEXER_SCRIPT`; with that unset it prints
+`[skip] INDEXER_SCRIPT not configured` and returns success, so a green run
+here does *not* mean an index exists. Before running it:
+
+1. Install an indexer — the companion repo
+   [vault-search](https://github.com/drpwchen/vault-search) is the one this
+   pipeline was built against — or write one exposing the same two calls
+   (`--incremental`, `--book <name>`).
+2. `pip install lancedb` (not in `requirements.txt`) if you also want
+   `post_convert.py`'s index-coverage audit.
+3. Set `INDEXER_SCRIPT` and `VAULT_SEARCH_DIR`, and have the local embedding
+   model running (e.g. `ollama pull bge-m3` then `ollama serve`).
+
+Then verify the index actually returns results for a test query before
+telling the user it's ready. If the user does not want any of this, say
+plainly that grep over `<OUTPUT_DIR>/` is the whole search story — that is a
+supported configuration, not a degraded one.
 
 ## Step 6: Install the two Claude Code skills
 

@@ -414,7 +414,13 @@ def verify_dark_with_ollama_vision(dark_files: list[str], batch_size: int = 5) -
     import base64
     import requests
 
-    model = os.environ.get("OLLAMA_VISION_MODEL", "gemma3:4b")
+    # T2N_OLLAMA_VISION_MODEL is the repo-wide name (figures/figure_qc_gate.py,
+    # figures/visual_check.py). The bare OLLAMA_VISION_MODEL is the name this one
+    # script shipped with, kept as a fallback so an existing public-repo user's
+    # environment doesn't silently change models under them.
+    model = (os.environ.get("T2N_OLLAMA_VISION_MODEL")
+             or os.environ.get("OLLAMA_VISION_MODEL")
+             or "gemma3:4b")
     confirmed = []
     total = len(dark_files)
 

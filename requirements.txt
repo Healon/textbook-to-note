@@ -4,7 +4,8 @@ pdfplumber>=0.10      # table extraction from PDF pages
 Pillow>=10.0          # image mode conversion / inversion (scan_fix_negatives.py)
 numpy>=1.24           # image histogram checks (scan_fix_negatives.py)
 
-# Optional extras (only needed if you use the matching feature):
+# Optional extras — listed as COMMENTS on purpose: `pip install -r requirements.txt`
+# does NOT install any of them. Install by hand only if you use the matching feature.
 #   epub conversion (convert.py convert_epub)     -> requires the `pandoc` CLI on PATH (not a pip package)
 #   Surya OCR fallback (convert.py surya_ocr_pdf) -> a Surya OCR install in a separate venv,
 #                                                     configured via SURYA_VENV_PY / SURYA_ADAPTER

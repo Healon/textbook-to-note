@@ -98,7 +98,7 @@ for the detection heuristics and fallback order.
 Output lives in a flat markdown corpus, one folder per book:
 
 ```
-textbook-md/
+<OUTPUT_DIR>/                 # default ./output (shared/config.py OUTPUT_DIR)
 ├── Author_Title_Edition_Year/
 │   ├── ch01_Introduction.md
 │   ├── ch02_....md
@@ -121,6 +121,17 @@ served through ollama, e.g. `bge-m3`) enables concept-level search across
 every converted book, in addition to plain-text `grep`. This is optional:
 grep-only works fine for a handful of books; the index pays off once you have
 dozens.
+
+**No indexer ships in this repo.** `converter/post_convert.py` provides the
+wiring only: `run_indexer()` invokes `INDEXER_SCRIPT --incremental`, and
+`audit_index_coverage()` compares book folders against rows in the LanceDB
+directory at `VAULT_SEARCH_DIR`, backfilling via `INDEXER_SCRIPT --book
+<name>`. With `INDEXER_SCRIPT` unset both steps print `[skip]` and return
+success. To turn semantic search on, point `INDEXER_SCRIPT` at the indexer
+from the companion repo
+[vault-search](https://github.com/drpwchen/vault-search), or at any script
+of your own implementing those two flags. `lancedb` is likewise a manual
+install, not part of `requirements.txt`.
 
 Search strategy used by the note-writing workflow:
 - Known keyword → grep first (fastest, exact, 0 tokens)
@@ -154,8 +165,8 @@ single entrypoint that:
 
 Every candidate crop is checked by cheap deterministic rules (whitespace
 fill, text bleed-in, panel completeness) before being accepted — never
-trusted on the vision model's say-so alone. See `docs/architecture.md` §
-figure QC and the `figure-remap` skill for the full contract.
+trusted on the vision model's say-so alone. See
+`skills/figure-remap/SKILL.md` for the full QC-gate and result contract.
 
 ## Why this order (fitz → deterministic match → local vision → frontier vision)
 
