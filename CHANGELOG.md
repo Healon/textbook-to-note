@@ -10,6 +10,14 @@ loose semantic versioning.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-07-22 — The OCR rung, and telling the truth in the docs
+
+Where 0.2.0 was about table fidelity, this one is about the two places the project was
+quietly asking users to trust something that wasn't there: an OCR rung whose central
+component was never shipped, and documentation describing behaviour the code did not have.
+Both were found the same way — by an outside user's agent following the docs literally and
+burning hours on it ([#3](https://github.com/drpwchen/textbook-to-note/issues/3)).
+
 ### Added
 - **A reference OCR adapter ships** — `converter/surya_adapter.py`, targeting Surya 0.22.x, plus
   [`docs/surya-adapter.md`](docs/surya-adapter.md) ([#4](https://github.com/drpwchen/textbook-to-note/issues/4)).
@@ -65,6 +73,25 @@ loose semantic versioning.
   table-dense books.
 
 ### Changed
+- **Documentation audited against the code, and corrected where it disagreed.** Each of these
+  was somewhere a reader could act on the docs and get a different result than the repo delivers:
+  semantic search was described as if an indexer shipped (it does not — `post_convert.py --index`
+  prints `[skip]` and returns success without `INDEXER_SCRIPT`, which is now stated, with the
+  companion repo [vault-search](https://github.com/drpwchen/vault-search) named as the thing to
+  point it at); `requirements.txt` was said to cover the semantic-search stack (lines 7-16 are all
+  comments); the figure-remap contract was documented with a `match_method` key that the
+  validator actively *rejects* (the real key is `match_quality`, and `qc_degraded` / `qc_skipped`
+  were undocumented); docs used a `textbook-md/` output directory that is really `OUTPUT_DIR`
+  (default `./output`); `architecture.md` pointed at a section of itself that does not exist; and
+  `scan_fix_negatives.py` read `OLLAMA_VISION_MODEL` while the rest of the repo uses the `T2N_`
+  namespace (now `T2N_OLLAMA_VISION_MODEL`, with the old name kept as a fallback so existing
+  environments don't silently switch models). Also corrected: the skill claimed a strict figure
+  hard_fail exits 2 (it exits 1), and that chapter splitting is not attempted on OCR'd books
+  (it is, best-effort).
+- **README no longer claims per-page OCR engine selection** (both variants). The detection
+  signals are per-page; the routing decision is per-book — one trip of the check sends the whole
+  PDF to OCR. Per-page routing is future work and is now labelled as such rather than described
+  as shipped.
 - **Setup guide no longer provisions OCR up front** (`AGENTS.md`, [#3](https://github.com/drpwchen/textbook-to-note/issues/3)).
   Step 1 asked whether the user had a GPU and pointed at the OCR ladder before a single page had
   been converted, which reads to a coding agent as "install the OCR stack now." It is an exception
