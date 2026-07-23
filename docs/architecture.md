@@ -114,6 +114,14 @@ as already converted.
 This corpus is **for the agent's own reference**, not meant to be read by a
 human — it's the substrate the note-writing workflow searches.
 
+**Corpus maintenance.** Four utilities operate on a whole corpus after a batch
+rather than on a single conversion — a post-batch triage report
+(`triage_report.py`), a post-hoc fake-table cleanup for markdown produced before
+the frame-reject fixes (`strip_fake_tables.py`), a ligature-expansion pass for
+corpora converted before ligatures were expanded (`expand_ligatures.py`), and a
+table-recovery pass for scan-only books that routed through OCR
+(`scan_table_pass.py`). See [`corpus-maintenance.md`](corpus-maintenance.md).
+
 ### 2. Semantic index (optional)
 
 For large corpora, a local vector index (LanceDB + a local embedding model

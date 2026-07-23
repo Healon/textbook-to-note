@@ -10,6 +10,31 @@ loose semantic versioning.
 
 ## [Unreleased]
 
+### Added
+- **Corpus-maintenance tools for whole-corpus and post-batch operations**, ported from the
+  production toolchain ([`docs/corpus-maintenance.md`](docs/corpus-maintenance.md)). All three act
+  on an existing corpus rather than a single conversion, and the two that rewrite files default to
+  a dry-run report:
+  - `converter/triage_report.py` turns a batch manifest into BLOCKED / REVIEW / ODD / OK buckets,
+    each with the reason and the evidence, so a bad conversion is caught by the report instead of
+    by a human happening to look at that one book. Thresholds sit near the p90 of a reference
+    corpus — an absolute cutoff like flag-rate > 0.40 flags ~84% of a clinical corpus, i.e.
+    nothing — and are meant to be re-derived whenever the table pipeline changes.
+  - `converter/strip_fake_tables.py` demotes false-positive tables — single-column pipe-wrapped
+    text, mostly-empty diagram-label grids, and small word-split fragments — back to plain text in
+    a corpus converted before the frame-reject fixes shipped. Content-preserving (cell text is
+    re-emitted as lines, so grep still hits), a book's own `Table N.N` label vetoes demotion, and
+    `--only-completed` / `--exclude-pending` keep it from racing a running batch.
+  - `converter/expand_ligatures.py` expands typographic ligatures (`ﬁ` / `ﬂ` / `ﬀ` / ...) in a
+    corpus converted before `clean_text()` learned to — the raw single-codepoint glyphs leave a
+    book unsearchable for any word that contains one (`speciﬁc` does not match `specific`). It
+    reuses the converter's own ligature map (so the two never drift), changes only those glyphs,
+    and is idempotent.
+  - `converter/scan_table_pass.py` recovers tables from scan-only books that routed through Surya
+    OCR and so came out as running text with zero tables. It is caption-targeted: it finds the
+    pages whose OCR text names a table and asks the Docling rung only about those pages (plus each
+    successor), rather than rendering every page of an 800-page book.
+
 ## [0.3.1] — 2026-07-23 — Contributor fixes and production hardening
 
 The first release to carry outside contributions. Three fixes to corpus text fidelity —
