@@ -10,7 +10,45 @@ loose semantic versioning.
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-07-23 — Contributor fixes and production hardening
+
+The first release to carry outside contributions. Three fixes to corpus text fidelity —
+typographic ligatures, en/em dashes in figure references, and presentational HTML in EPUBs —
+arrived as pull requests from [@pig18888](https://github.com/pig18888); a follow-up then
+collapses the project's scattered dash definitions into one. Alongside them: two fixes proven on
+a full 154-book production run before landing here, and a docs-only split into three usage
+profiles so an agent installs only the stack the user actually asked for.
+
 ### Fixed
+- **Typographic ligatures are expanded so the corpus stays searchable**
+  ([#6](https://github.com/drpwchen/textbook-to-note/pull/6), thanks
+  [@pig18888](https://github.com/pig18888)). PDF text layers emit `ﬁ`, `ﬂ`, `ﬀ`, `ﬃ`, `ﬄ`, `ﬅ`,
+  `ﬆ` as single codepoints, so a search for `specific` finds zero hits in a book that holds 116
+  occurrences of `speciﬁc`. `clean_text()` now maps them to their ASCII pairs explicitly — not via
+  NFKC, which would also rewrite the scientific notation (`μ`, the U+2212 minus, superscripts) the
+  corpus needs to keep intact.
+- **Figure and table references are matched across the full range of dashes**
+  ([#8](https://github.com/drpwchen/textbook-to-note/pull/8), thanks
+  [@pig18888](https://github.com/pig18888)). Publishers typeset figure numbers with whatever dash
+  their house style uses; Katzung 16e runs on en dashes throughout (`Figure 33–3`) — 717 en dashes
+  to 8 ASCII hyphens — so the old `[-.]` pattern matched 14 references and left figure extraction
+  blind for the whole book. The detection patterns now span U+2010–U+2015 and U+2212.
+- **Presentational HTML is stripped from converted EPUBs**
+  ([#9](https://github.com/drpwchen/textbook-to-note/pull/9), thanks
+  [@pig18888](https://github.com/pig18888)). calibre leaves `<a>` / `<div>` / `<span>` wrappers
+  that pandoc passes straight through in gfm; they carry no meaning but on one 52-chapter textbook
+  they were 41% of every character, diluting each chunk the indexer builds. `strip_epub_noise()`
+  drops the wrappers and keeps their inner text — semantic tags stay in, since `<sup>` / `<sub>`
+  carry chemical formulae and charges and the table tags carry structure.
+- **One dash definition, shared by both sides of the figure pipeline**
+  ([#10](https://github.com/drpwchen/textbook-to-note/issues/10)). #8 widened the converter's
+  figure/table reference detection to U+2010–U+2015 and U+2212, but the figure stage kept its own
+  narrower, hand-maintained copies (`qc_metrics._SEP`, `figure_qc_gate._DASHES`,
+  `figure_scanned._DASHES`) — so a book typeset in, say, non-breaking hyphens would get
+  `<!-- REF: ... -->` markers the caption matcher silently failed to consume. The canonical set
+  now lives in `shared/config.py` (`DASH_CHARS` / `SEP_CLASS`) and all four call sites import it;
+  the OCR-substitution neighbour checks inside `normalize_fig_id()` were widened with it. Existing
+  normalize/caption tests re-run: 242 pass / 0 fail / 5 skip, unchanged from baseline.
 - **Docling degraded-book warning no longer cries wolf on every book after one failure.** The
   warning tested the worker's `last_error` for truthiness, but that field is sticky by design (the
   *last* error, never cleared on success) — with a shared warm worker, a single page timeout in book
@@ -25,15 +63,6 @@ loose semantic versioning.
   (`garbage=4, clean=True`) to a temp copy and the table pass retried on that; the repair is
   reported in the book's warnings either way. Both fixes were proven in a 154-book production
   run before landing here.
-- **One dash definition, shared by both sides of the figure pipeline**
-  ([#10](https://github.com/drpwchen/textbook-to-note/issues/10)). #8 widened the converter's
-  figure/table reference detection to U+2010–U+2015 and U+2212, but the figure stage kept its own
-  narrower, hand-maintained copies (`qc_metrics._SEP`, `figure_qc_gate._DASHES`,
-  `figure_scanned._DASHES`) — so a book typeset in, say, non-breaking hyphens would get
-  `<!-- REF: ... -->` markers the caption matcher silently failed to consume. The canonical set
-  now lives in `shared/config.py` (`DASH_CHARS` / `SEP_CLASS`) and all four call sites import it;
-  the OCR-substitution neighbour checks inside `normalize_fig_id()` were widened with it. Existing
-  normalize/caption tests re-run: 242 pass / 0 fail / 5 skip, unchanged from baseline.
 
 ### Changed
 - **Three usage profiles replace the implicit all-or-nothing setup** (docs only). The repo reads
@@ -45,6 +74,12 @@ loose semantic versioning.
   later step with the profiles it belongs to. The failure this prevents is an agent helpfully
   installing ollama, an embedding model, and the skills for a user who only ever wanted greppable
   markdown; the same over-eagerness that made the OCR path in 0.3.0 expensive.
+- **The Surya-adapter reference now reports measured GPU numbers.** The GPU smoke run finished
+  after 0.3.0 was tagged, so [`docs/surya-adapter.md`](docs/surya-adapter.md) now carries it
+  beside the CPU run: ~0.15 pages/s end to end and a capped inference server fitting in ~2.3 GB
+  VRAM on an 8 GB card, closing [#4](https://github.com/drpwchen/textbook-to-note/issues/4).
+  Flagged as an order-of-magnitude anchor — n=5 pages, measured once, on a card shared with
+  another job — not a benchmark.
 
 ## [0.3.0] — 2026-07-22 — The OCR rung, and telling the truth in the docs
 
@@ -198,5 +233,7 @@ retrieve (local LanceDB semantic search with source weighting), write (template-
 citation-enforced, non-destructive), extract figures (geometric match + deterministic QC gate).
 Bilingual READMEs and note templates; ships as skills an AI agent installs from `AGENTS.md`.
 
+[0.3.1]: https://github.com/drpwchen/textbook-to-note/releases/tag/v0.3.1
+[0.3.0]: https://github.com/drpwchen/textbook-to-note/releases/tag/v0.3.0
 [0.2.0]: https://github.com/drpwchen/textbook-to-note/releases/tag/v0.2.0
 [0.1.0]: https://github.com/drpwchen/textbook-to-note/releases/tag/v0.1.0
